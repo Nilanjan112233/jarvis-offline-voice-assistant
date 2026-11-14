@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app" id="app">
+  <header class="top pywebview-drag-region">
+    <div class="mini-orb" id="miniOrb"></div>
+    <div class="title">
+      <h1>Jarvis</h1>
+      <div class="status" id="status">Starting up…</div>
+    </div>
+    <button class="icon-btn on" id="voiceBtn" title="Spoken replies">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+    </button>
+    <button class="icon-btn" id="settingsBtn" title="Settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+    <button class="icon-btn" id="hideBtn" title="Hide (the orb stays)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
+    </button>
+  </header>
+
+  <nav class="chips" id="chips">
+    <button class="chip" data-q="Give me my daily briefing">☀️ Briefing</button>
+    <button class="chip" data-q="What's the weather where I live?">🌦️ Weather</button>
+    <button class="chip" data-q="system check">🖥️ System</button>
+    <button class="chip" data-q="What reminders do I have?">⏰ Reminders</button>
+    <button class="chip" data-q="Show all my lists">📝 Lists</button>
+    <button class="chip" data-q="Latest news in India">📰 News</button>
+    <button class="chip" data-q="What's on my screen?">🖱️ Screen</button>
+  </nav>
+
+  <main class="feed" id="feed">
+    <div class="empty" id="empty">
+      <div class="mini-orb" style="width:64px;height:64px;margin:auto"></div>
+      <div class="big" id="greet">Good day.</div>
+      <div>Say <kbd>Hey Jarvis</kbd>, press <kbd>Ctrl</kbd>+<kbd>Space</kbd>, or type below.</div>
+    </div>
+  </main>
+
+  <footer class="composer">
+    <button class="mic" id="micBtn" title="Talk (Ctrl+Space)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+    </button>
+    <div class="field">
+      <input id="input" placeholder="Ask Jarvis anything…" autocomplete="off">
+      <button class="send" id="sendBtn" title="Send">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+  </footer>
+
+  <section class="sheet" id="sheet">
+    <header class="top">
+      <button class="icon-btn" id="backBtn" title="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+      <div class="title"><h1>Settings</h1><div class="status">Everything stays on this PC</div></div>
+    </header>
+    <div class="body">
+      <div class="sec">
+        <h2>Voice</h2>
+        <div class="opt"><div class="l">Spoken replies<small>Jarvis reads answers aloud</small></div><button class="toggle on" data-set="voice"></button></div>
+        <div class="opt"><div class="l">Wake word "Hey Jarvis"<small>Always listening offline for the wake word only (~0.4% CPU). Nothing is recorded until you say it.</small></div><button class="toggle on" data-set="wake"></button></div>
+        <div class="opt"><div class="l">Shortcut<small>Talk from anywhere</small></div><span><kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>J</kbd></span></div>
+      </div>
+      <div class="sec">
+        <h2>Startup</h2>
+        <div class="opt"><div class="l">Start with Windows<small>Orb appears when you sign in</small></div><button class="toggle" data-set="autostart"></button></div>
+      </div>
+      <div class="sec">
+        <h2>What Jarvis remembers</h2>
+        <div id="memList"></div>
+      </div>
+      <div class="sec">
+        <h2>Learned skills</h2>
+        <div id="skillList"></div>
+      </div>
+      <div class="sec">
+        <h2>Data</h2>
+        <div class="opt"><div class="l">Activity log &amp; notes<small>Every action Jarvis takes is logged</small></div><button class="chip" id="openData">Open folder</button></div>
+        <div class="opt"><div class="l">Quit Jarvis<small>Closes the orb and frees all memory</small></div><button class="chip" id="quitBtn">Quit</button></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="toast" id="toast"></div>
+</div>
+<script src="panel.js"></script>
+</body>
+</html>

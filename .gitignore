@@ -1,0 +1,14 @@
+# downloaded by setup.ps1
+downloads/
+engine/
+models/
+voice/
+bin/
+.venv/
+# personal runtime data: memory, notes, reminders, logs, browser cache
+data/
+__pycache__/
+*.log
+*.gguf
+*.onnx
+*.exe
