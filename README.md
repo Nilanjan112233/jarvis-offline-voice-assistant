@@ -21,7 +21,7 @@ A personal assistant that runs **entirely on your own PC**: wake word, speech-to
                      answer ─► panel cards + spoken reply (Piper TTS)
 ```
 
-**The model:** [Gemma 4 E2B trimmed to an English-only vocabulary](https://github.com/{{GH_USER}}/gguf-vocab-trim). That is my own no-training method: the file is 41% smaller and the assistant is 33% faster per task, with the same accuracy.
+**The model:** [Gemma 4 E2B trimmed to an English-only vocabulary](https://github.com/Nilanjan112233/gguf-vocab-trim). That is my own no-training method: the file is 41% smaller and the assistant is 33% faster per task, with the same accuracy.
 
 ## Results
 
@@ -56,7 +56,7 @@ More than 20 kinds of request are answered instantly by the router, with no LLM,
 ## Setup (Windows 10/11, Python 3.13)
 
 ```powershell
-git clone https://github.com/{{GH_USER}}/jarvis-assistant
+git clone https://github.com/Nilanjan112233/jarvis-assistant
 cd jarvis-assistant
 powershell -ExecutionPolicy Bypass -File setup.ps1   # ~2 GB of engine/models/voice, SHA-256 checked
 .\run_jarvis.bat

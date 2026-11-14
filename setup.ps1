@@ -13,9 +13,9 @@ $Files = @(
   # url, saved as, sha256
   @("https://github.com/ggml-org/llama.cpp/releases/download/b12360/llama-b12360-bin-win-cpu-x64.zip", "$Dl\llama-cpu.zip",
     "eae1726047e0eaa707b1302929d196c999b96c2f243b21aea6e93bcebacc4e17"),
-  @("$HF/{{HF_REPO}}/resolve/main/gemma-4-E2B-en50v-Q4_0.gguf", "$Root\models\gemma-4-E2B-en50v-Q4_0.gguf",
+  @("$HF/Nilmon/gemma-4-E2B-en50v-GGUF/resolve/main/gemma-4-E2B-en50v-Q4_0.gguf", "$Root\models\gemma-4-E2B-en50v-Q4_0.gguf",
     "0549a38ee4b990fdfa46774b336abd800db01fa20677d6ff368dac87cb47435a"),
-  @("$HF/{{HF_REPO}}/resolve/main/mtp-gemma-4-E2B-en50v-Q4_0.gguf", "$Root\models\mtp-gemma-4-E2B-en50v-Q4_0.gguf",
+  @("$HF/Nilmon/gemma-4-E2B-en50v-GGUF/resolve/main/mtp-gemma-4-E2B-en50v-Q4_0.gguf", "$Root\models\mtp-gemma-4-E2B-en50v-Q4_0.gguf",
     "7e6a22ed74d17775194727d994b6a8c662446f534a1dd52ec9ce0ee7adf23857"),
   @("$HF/CompendiumLabs/bge-small-en-v1.5-gguf/resolve/main/bge-small-en-v1.5-q8_0.gguf", "$Root\models\bge-small-en-v1.5-q8_0.gguf",
     "ec38e8da142596baa913124ae50550de284b6916bf59577ef2f0cb9660c2f514"),
