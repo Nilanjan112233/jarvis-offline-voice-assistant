@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Jarvis preview</title>
+<style>
+  body { margin: 0; background: linear-gradient(135deg, #1b2a4a, #3a2457 60%, #14324a); min-height: 100vh; display: flex; gap: 28px; align-items: flex-start; padding: 24px; font-family: Segoe UI, sans-serif; color: #ccd; }
+  iframe { border: 0; border-radius: 18px; box-shadow: 0 24px 60px rgba(0,0,0,.55); background: transparent; }
+  .col { display: flex; flex-direction: column; gap: 10px; align-items: center; }
+</style></head>
+<body>
+  <div class="col"><iframe src="orb.html" width="130" height="130" style="box-shadow:none"></iframe><small>orb (always on top)</small></div>
+  <div class="col"><iframe id="p" src="panel.html" width="420" height="700"></iframe><small>panel</small></div>
+</body></html>

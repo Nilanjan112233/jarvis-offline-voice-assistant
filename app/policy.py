@@ -1,3 +1,4 @@
+import re
 """Safety guardrails for actions. Enforced in CODE, not by the model.
 
   SAFE    - runs straight away: anything that only LOOKS (read files, list folders, read-only commands,
@@ -13,10 +14,10 @@ from pathlib import Path
 SAFE, CONFIRM, BLOCK = "safe", "confirm", "block"
 
 TOOL_RISK = {
-    "web_search": SAFE, "get_news": SAFE, "get_weather": SAFE, "convert_currency": SAFE, "read_webpage": SAFE, "system_info": SAFE,
+    "read_screen": SAFE, "media_control": SAFE, "web_search": SAFE, "get_news": SAFE, "get_weather": SAFE, "convert_currency": SAFE, "read_webpage": SAFE, "system_info": SAFE,
     "list_files": SAFE, "read_file": SAFE, "find_files": SAFE, "folder_sizes": SAFE,
     "use_skill": SAFE, "ask_big_ai": SAFE, "run_command": SAFE, "run_python": SAFE,
-    "open_app": SAFE, "open_url": SAFE, "play_music": SAFE, "set_volume": SAFE, "open_settings": SAFE,
+    "open_app": SAFE, "open_url": SAFE, "play_music": SAFE, "jarvis_settings": SAFE, "play_video": SAFE, "open_incognito": SAFE, "set_volume": SAFE, "open_settings": SAFE,
     "take_note": SAFE, "set_reminder": SAFE, "remember": SAFE, "forget": SAFE, "save_skill": SAFE,
     # additions: look-only or small & easy to undo
     "world_time": SAFE, "network_info": SAFE, "installed_apps": SAFE, "largest_files": SAFE, "read_notes": SAFE,
@@ -126,6 +127,9 @@ def check(tool, args, user_text):
                 return BLOCK, "that location is part of Windows/apps"
         return CONFIRM, f"moves {args.get('source')} to {args.get('destination')}"
     if tool == "close_app":
+        if re.search(r"^\s*(windows )?(settings|calculator|calc|clock|alarms|photos|media player|camera|maps|weather|"
+                     r"spotify|groove|movies|task manager|snipping tool|control panel|sound settings)\s*$", str(args.get("name", "")), re.I):
+            return SAFE, ""   # nothing to lose in these
         return CONFIRM, f"closes {args.get('name')} (unsaved work could be lost)"
     if tool == "send_message":
         return CONFIRM, "sends a message to another person"

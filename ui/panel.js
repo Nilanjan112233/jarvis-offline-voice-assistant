@@ -2,7 +2,7 @@
 // Without pywebview (opened in a normal browser) it runs a DEMO so the design can be previewed.
 const $ = (s) => document.querySelector(s);
 const feed = $("#feed"), input = $("#input"), app = $("#app"), statusEl = $("#status");
-let api = null, current = null, settings = { voice: true, wake: false, autostart: false };
+let api = null, current = null, settings = { voice: true, wake: true, followup: true, autostart: false };
 
 const STATE_LABEL = { idle: "Ready", listening: "Listening…", understanding: "Understanding…", thinking: "Thinking…",
                       working: "Working…", speaking: "Speaking…", waiting: "Waiting for your OK", starting: "Starting up…" };
@@ -11,16 +11,49 @@ function esc(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp
 function scroll() { feed.scrollTop = feed.scrollHeight; }
 function toast(text) { const t = $("#toast"); t.textContent = text; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 3500); }
 
-function setState(state, detail) {
-  statusEl.textContent = detail || STATE_LABEL[state] || state;
-  const glow = { listening: "0 0 22px rgba(255,79,139,.8)", thinking: "0 0 22px rgba(155,107,255,.8)", working: "0 0 22px rgba(155,107,255,.8)",
-                 speaking: "0 0 26px rgba(56,225,255,.95)", waiting: "0 0 22px rgba(255,181,71,.8)" }[state];
-  document.querySelectorAll(".mini-orb").forEach((o) => (o.style.boxShadow = glow || ""));
-  app.classList.toggle("busy", !["idle", "speaking"].includes(state));
-  $("#micBtn").classList.toggle("rec", state === "listening");
+// living orbs (header + start screen), same renderer as the floating orb
+const orbs = [createOrb($("#miniOrb"), { particles: 90, radius: 0.27 })];
+if ($("#heroOrb")) orbs.push(createOrb($("#heroOrb"), { particles: 260, radius: 0.25 }));
+
+function applyTheme(name) {
+  document.documentElement.dataset.theme = name || "glass";
+  orbs.forEach((o) => o.theme(name));
+  document.querySelectorAll(".swatch").forEach((s) => s.classList.toggle("on", s.dataset.themePick === name));
 }
 
-function hideEmpty() { const e = $("#empty"); if (e) e.remove(); }
+function setState(state, detail) {
+  statusEl.textContent = detail || STATE_LABEL[state] || state;
+  orbs.forEach((o) => o.set(state));
+  app.classList.toggle("busy", !["idle", "speaking"].includes(state));
+  $("#micBtn").classList.toggle("rec", state === "listening");
+  if (state !== "listening") $("#micBtn").style.setProperty("--lvl", 0);
+}
+
+function setLevel(v) {
+  orbs.forEach((o) => o.level(v));
+  $("#micBtn").style.setProperty("--lvl", v.toFixed(2));
+}
+
+// live words while you talk
+function showCaption(text) {
+  let c = document.getElementById("liveCap");
+  if (!text) { c?.remove(); return; }
+  if (!c) { hideEmpty(); c = document.createElement("div"); c.id = "liveCap"; c.className = "msg-you live"; feed.appendChild(c); }
+  c.textContent = text; scroll();
+}
+
+// voice training (Settings -> Teach Jarvis my voice)
+function showTrain(e) {
+  const box = $("#train"); box.hidden = false;
+  $("#tStep").textContent = e.done ? "" : `${e.step} / ${e.total}`;
+  $("#tPrompt").textContent = e.prompt || "";
+  $("#tHint").textContent = e.hint || "";
+  $("#tBar").style.width = e.done ? "100%" : `${Math.round(100 * (e.step - 1) / e.total)}%`;
+  box.classList.toggle("ok", !!e.done && !!e.ok);
+  $("#trainBtn").disabled = !e.done;
+}
+
+function hideEmpty() { const e = $("#empty"); if (e) { e.remove(); orbs.length = 1; } }
 
 function addYou(text) {
   hideEmpty();
@@ -45,6 +78,7 @@ function addStep(line) {
 function addAnswer(text, cards, secs, tools) {
   if (!current) { addYou("…"); }
   current.querySelector(".thinking")?.remove();
+  current.querySelector(".bubble.draft")?.remove();
   current.querySelectorAll(".step.live").forEach((s) => { s.classList.remove("live"); s.classList.add("done"); });
   const b = document.createElement("div");
   b.className = "bubble"; b.textContent = text;
@@ -107,7 +141,7 @@ function renderCard(c) {
 window.onEvent = function (e) {
   switch (e.type) {
     case "state": setState(e.state, e.detail); break;
-    case "heard": input.value = ""; addYou(e.text); break;
+    case "heard": input.value = ""; showCaption(""); if (!pendingTyped || pendingTyped !== e.text) addYou(e.text); pendingTyped = null; break;
     case "step": addStep(e.line); break;
     case "confirm": addAsk(e); break;
     case "answer": addAnswer(e.text, e.cards, e.secs, e.tools); break;
@@ -116,17 +150,43 @@ window.onEvent = function (e) {
       d.innerHTML = `<div class="ask"><div class="t">⏰ Reminder</div><div class="r" style="color:var(--text);font-size:14px">${esc(e.text)}</div></div>`;
       feed.appendChild(d); scroll(); } break;
     case "toast": toast(e.text); break;
-    case "settings": settings = e.settings; renderSettings(e); break;
+    case "caption": showCaption(e.text); break;
+    case "draft": showDraft(e.text); break;
+    case "queued": addQueued(e.text, e.n); break;
+    case "begin": { const q = feed.querySelector(".msg-you.queued"); if (q) q.remove(); } break;
+    case "unqueue": feed.querySelectorAll(".msg-you.queued").forEach((q) => q.remove()); break;
+    case "level": setLevel(e.v); break;
+    case "train": showTrain(e); break;
+    case "settings": settings = e.settings; applyTheme(settings.theme); renderSettings(e); break;
   }
 };
 
 // ------------------------------------------------------------ user actions
+let pendingTyped = null;
 function send(text) {
   text = (text ?? input.value).trim();
-  if (!text || app.classList.contains("busy")) return;
+  if (!text) return;
   input.value = "";
-  addYou(text);
-  api.send(text);
+  if (!app.classList.contains("busy") && !/^\W*(stop|cancel)\b/i.test(text)) { addYou(text); pendingTyped = text; }
+  api.send(text);        // busy -> Python queues it (or stops on "stop")
+}
+
+// the reply being written, word by word
+function showDraft(text) {
+  if (!current) return;
+  let d = current.querySelector(".bubble.draft");
+  if (!text) { d?.remove(); return; }
+  current.querySelector(".thinking")?.remove();
+  if (!d) { d = document.createElement("div"); d.className = "bubble draft"; current.appendChild(d); }
+  d.textContent = text; scroll();
+}
+
+function addQueued(text, n) {
+  hideEmpty();
+  const d = document.createElement("div");
+  d.className = "msg-you queued"; d.textContent = text; d.title = "Queued — Jarvis will do this next";
+  feed.appendChild(d); scroll();
+  toast(n > 1 ? `Queued (${n} waiting). Say or type "stop" to cancel.` : 'Queued — I\'ll do that next. Say "stop" to cancel.');
 }
 $("#sendBtn").onclick = () => send();
 input.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
@@ -141,12 +201,17 @@ $("#settingsBtn").onclick = () => { api.get_settings(); $("#sheet").classList.ad
 $("#backBtn").onclick = () => $("#sheet").classList.remove("open");
 $("#openData").onclick = () => api.open_data();
 $("#quitBtn").onclick = () => api.quit();
+document.querySelectorAll(".swatch").forEach((s) => (s.onclick = () => { applyTheme(s.dataset.themePick); api.set_setting("theme", s.dataset.themePick); }));
+$("#trainBtn").onclick = () => { $("#trainBtn").disabled = true; api.train_voice(); };
 $("#voiceBtn").onclick = () => api.set_setting("voice", !settings.voice);
 document.querySelectorAll(".toggle").forEach((t) => (t.onclick = () => api.set_setting(t.dataset.set, !settings[t.dataset.set])));
 
 function renderSettings(e) {
   document.querySelectorAll(".toggle").forEach((t) => t.classList.toggle("on", !!settings[t.dataset.set]));
   $("#voiceBtn").classList.toggle("on", !!settings.voice);
+  $("#voiceState").textContent = e.voice_trained ? "Trained on your voice ✓ — run again any time to refresh it."
+    : 'Say "Hey Jarvis" 10 times + read 4 lines (~1 min). Wakes more reliably, ignores other voices.';
+  $("#trainBtn").textContent = e.voice_trained ? "Retrain" : "Start";
   const mem = $("#memList"), sk = $("#skillList");
   mem.innerHTML = (e.memory || []).length ? e.memory.map((m, i) => `<div class="item"><span>${esc(m)}</span><button data-mem="${i}" title="Forget">×</button></div>`).join("")
     : `<div class="muted">Nothing yet. Tell Jarvis things like "my name is…" or "I live in…".</div>`;
@@ -194,7 +259,8 @@ function startDemo() {
     listen() { setState("listening"); setTimeout(() => { setState("idle"); window.onEvent({ type: "heard", text: "What's the weather like?" }); api.send("weather"); }, 1500); },
     hush() {}, quit() {}, hide_panel() { toast("The panel hides; the orb stays on screen."); }, open_data() {},
     get_settings() { window.onEvent({ type: "settings", settings, memory: ["User's name is Alex", "User lives in Kolkata", "Don't use Spotify"], skills: ["system_check: when I say 'system check'"] }); },
-    set_setting(k, v) { settings[k] = v; this.get_settings(); }, forget_index() {}, delete_skill() {}, ready() {},
+    set_setting(k, v) { settings[k] = v; this.get_settings(); }, train_voice() {}, forget_voice() {}, forget_index() {}, delete_skill() {}, ready() {},
   };
   setState("idle", "Demo mode (no backend)");
+  if (location.hash === "#crimson") applyTheme("crimson");
 }

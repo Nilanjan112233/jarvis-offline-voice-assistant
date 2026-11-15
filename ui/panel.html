@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="glass">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,7 +9,7 @@
 <body>
 <div class="app" id="app">
   <header class="top pywebview-drag-region">
-    <div class="mini-orb" id="miniOrb"></div>
+    <canvas class="mini-orb" id="miniOrb" width="96" height="96"></canvas>
     <div class="title">
       <h1>Jarvis</h1>
       <div class="status" id="status">Starting up…</div>
@@ -37,9 +37,9 @@
 
   <main class="feed" id="feed">
     <div class="empty" id="empty">
-      <div class="mini-orb" style="width:64px;height:64px;margin:auto"></div>
+      <canvas id="heroOrb" width="336" height="336"></canvas>
       <div class="big" id="greet">Good day.</div>
-      <div>Say <kbd>Hey Jarvis</kbd>, press <kbd>Ctrl</kbd>+<kbd>Space</kbd>, or type below.</div>
+      <div>Say <kbd>Hey Jarvis</kbd>, press <kbd>Ctrl</kbd>+<kbd>Space</kbd> (or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>J</kbd> anywhere), or type below.</div>
     </div>
   </main>
 
@@ -64,8 +64,24 @@
       <div class="sec">
         <h2>Voice</h2>
         <div class="opt"><div class="l">Spoken replies<small>Jarvis reads answers aloud</small></div><button class="toggle on" data-set="voice"></button></div>
-        <div class="opt"><div class="l">Wake word "Hey Jarvis"<small>Always listening offline for the wake word only (~0.4% CPU). Nothing is recorded until you say it.</small></div><button class="toggle on" data-set="wake"></button></div>
+        <div class="opt"><div class="l">Wake word "Hey Jarvis"<small>Listens offline for the wake word only (~0.4% CPU). Nothing is kept until you say it.</small></div><button class="toggle on" data-set="wake"></button></div>
+        <div class="opt"><div class="l">Keep listening after answers<small>Ask a follow-up within ~5 s without saying "Hey Jarvis" again</small></div><button class="toggle on" data-set="followup"></button></div>
+        <div class="opt"><div class="l">Teach Jarvis my voice<small id="voiceState">Say "Hey Jarvis" 10 times + read 4 lines (~1 min). Wakes more reliably, ignores other voices.</small></div><button class="chip" id="trainBtn">Start</button></div>
+        <div class="train" id="train" hidden>
+          <div class="tstep" id="tStep"></div>
+          <div class="tprompt" id="tPrompt"></div>
+          <div class="thint" id="tHint"></div>
+          <div class="tbar"><b id="tBar"></b></div>
+        </div>
         <div class="opt"><div class="l">Shortcut<small>Talk from anywhere</small></div><span><kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>J</kbd></span></div>
+      </div>
+      <div class="sec">
+        <h2>Look</h2>
+        <div class="themes">
+          <button class="swatch" data-theme-pick="glass"><i></i><span>Glass<small>clear &amp; silver</small></span></button>
+          <button class="swatch" data-theme-pick="emerald"><i></i><span>Emerald<small>jade &amp; gold</small></span></button>
+          <button class="swatch" data-theme-pick="crimson"><i></i><span>Crimson<small>ember &amp; red</small></span></button>
+        </div>
       </div>
       <div class="sec">
         <h2>Startup</h2>
@@ -89,6 +105,7 @@
 
   <div class="toast" id="toast"></div>
 </div>
+<script src="orb.js"></script>
 <script src="panel.js"></script>
 </body>
 </html>

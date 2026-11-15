@@ -23,6 +23,7 @@ class Speaker:
         self.q = queue.Queue()
         self.stop_flag = threading.Event()
         self.voice = None
+        self.speed = 1.0            # 1.0 normal, 1.3 faster, 0.8 slower
         try:
             from piper import PiperVoice
             self.voice = PiperVoice.load(str(PIPER_MODEL))
@@ -30,59 +31,98 @@ class Speaker:
                 pass
         except Exception as e:
             print("Piper voice not available, using Windows voice:", e)
+        self.audio_q = queue.Queue()
+        self._gen = 0                     # bumped by stop(): audio made before a stop is never played
         threading.Thread(target=self._loop, daemon=True).start()
+        threading.Thread(target=self._play_loop, daemon=True).start()
 
     def say(self, text):
         text = re.sub(r"[*#`_>|]", "", text or "").strip()
         if text:
-            self.q.put(text)
+            self.q.put((self._gen, text))
 
     def stop(self):
         """Interrupt current speech and drop anything queued."""
-        self.stop_flag.set()
-        try:
-            while True:
-                self.q.get_nowait()
-        except queue.Empty:
-            pass
+        self._gen += 1
+        for q in (self.q, self.audio_q):
+            try:
+                while True:
+                    q.get_nowait()
+            except queue.Empty:
+                pass
         sd.stop()
 
     def busy(self):
-        return not self.q.empty() or self._speaking
+        return not self.q.empty() or not self.audio_q.empty() or self._speaking or self._playing
 
-    _speaking = False
+    def chime(self, kind="wake"):
+        """Short two-note sound: 'wake' (rising) = I'm listening, 'off' (falling) = stopped listening."""
+        if self.busy():
+            return
+        sr = 22050
+        t = np.arange(int(sr * 0.07)) / sr
+        notes = {"wake": (880, 1320), "off": (990, 660)}[kind]
+        tone = np.concatenate([np.sin(2 * np.pi * f * t) * np.hanning(len(t)) for f in notes])
+        try:
+            sd.play((tone * 0.22 * 32767).astype(np.int16), sr)
+        except Exception:
+            pass
+
+    _speaking = _playing = False
 
     def _loop(self):
+        """Makes the audio for each sentence while the previous one is still playing (no gaps between sentences)."""
         while True:
-            text = self.q.get()
-            self.stop_flag.clear()
+            gen, text = self.q.get()
+            if gen != self._gen:
+                continue                      # queued before a stop
             self._speaking = True
             try:
                 for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
-                    if self.stop_flag.is_set():
+                    if gen != self._gen:
                         break
                     if sentence.strip():
-                        self._speak(sentence.strip())
+                        audio = self._synth(sentence.strip())
+                        if gen == self._gen:
+                            self.audio_q.put((gen, audio))
             except Exception as e:
                 print("speech error:", e)
             self._speaking = False
 
-    def _speak(self, sentence):
-        if self.voice:
-            chunks, rate = [], 22050
-            for ch in self.voice.synthesize(sentence):
-                chunks.append(ch.audio_int16_array)
-                rate = ch.sample_rate
-            if chunks and not self.stop_flag.is_set():
-                sd.play(np.concatenate(chunks), rate)
-                while sd.get_stream().active:
-                    if self.stop_flag.is_set():
-                        sd.stop(); break
-                    time.sleep(0.03)
-        else:
-            subprocess.run(["powershell", "-NoProfile", "-Command",
-                            "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak($input)"],
-                           input=sentence, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    def _play_loop(self):
+        while True:
+            gen, (audio, rate) = self.audio_q.get()
+            if gen != self._gen:
+                continue
+            self._playing = True
+            try:
+                if rate == "win":
+                    subprocess.run(["powershell", "-NoProfile", "-Command",
+                                    "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak($input)"],
+                                   input=audio, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                else:
+                    sd.play(audio, rate)
+                    while sd.get_stream().active:
+                        if gen != self._gen:
+                            sd.stop(); break
+                        time.sleep(0.02)
+            except Exception as e:
+                print("speech error:", e)
+            self._playing = False
+
+    def _synth(self, sentence):
+        if not self.voice:
+            return (sentence, "win")
+        chunks, rate = [], 22050
+        try:
+            from piper.config import SynthesisConfig
+            cfg = SynthesisConfig(length_scale=1.0 / max(0.5, min(2.0, self.speed)))
+        except Exception:
+            cfg = None
+        for ch in (self.voice.synthesize(sentence, syn_config=cfg) if cfg else self.voice.synthesize(sentence)):
+            chunks.append(ch.audio_int16_array)
+            rate = ch.sample_rate
+        return (np.concatenate(chunks) if chunks else np.zeros(1, np.int16), rate)
 
 
 # ================================================================ listening

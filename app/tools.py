@@ -530,16 +530,100 @@ def open_url(url):
     webbrowser.open(url); return f"Opened {url}"
 
 
-def play_music(query):
+def _chrome_exe():
+    for p in (Path(os.environ.get("ProgramFiles", "")) / r"Google\Chrome\Application\chrome.exe",
+              Path(os.environ.get("ProgramFiles(x86)", "")) / r"Google\Chrome\Application\chrome.exe",
+              Path(os.environ.get("LOCALAPPDATA", "")) / r"Google\Chrome\Application\chrome.exe"):
+        if p.exists():
+            return str(p)
+    return None
+
+
+def _yes(v):
+    return str(v).strip().lower() in ("yes", "true", "1", "y", "incognito", "private", "on")
+
+
+def _browse(url, incognito=False):
+    """Open a web address; incognito -> Chrome --incognito (or Edge InPrivate)."""
+    if incognito:
+        exe = _chrome_exe()
+        if exe:
+            subprocess.Popen([exe, "--incognito", url], creationflags=subprocess.CREATE_NO_WINDOW)
+            return "a Chrome incognito window"
+        edge = next((p for p in (Path(os.environ.get("ProgramFiles(x86)", "")) / r"Microsoft\Edge\Application\msedge.exe",
+                                 Path(os.environ.get("ProgramFiles", "")) / r"Microsoft\Edge\Application\msedge.exe") if p.exists()), None)
+        if edge:
+            subprocess.Popen([str(edge), "--inprivate", url], creationflags=subprocess.CREATE_NO_WINDOW)
+            return "an Edge InPrivate window"
+    webbrowser.open(url)
+    return "the browser"
+
+
+def _youtube_first(query):
+    """First video for a search on YouTube -> (video_id, title) or (None, None). Retries, then asks DuckDuckGo."""
+    page = ""
+    for timeout in (8, 15):
+        try:
+            page = _get("https://www.youtube.com/results?search_query=" + urllib.parse.quote_plus(query), timeout=timeout)
+            if '"videoId"' in page:
+                break
+        except Exception:
+            time.sleep(0.5)
+    if '"videoId"' not in page:
+        try:
+            ddg = _get("https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query + " site:youtube.com"), timeout=10)
+            m = re.search(r"youtube\.com%2Fwatch%3Fv%3D([\w-]{11})|youtube\.com/watch\?v=([\w-]{11})", ddg)
+            if m:
+                return m.group(1) or m.group(2), None
+        except Exception:
+            pass
+        return None, None
+    m = re.search(r'"videoRenderer":\{"videoId":"([\w-]{11})".*?"title":\{"runs":\[\{"text":"(.*?)"\}', page)
+    if m:
+        return m.group(1), json.loads('"' + m.group(2) + '"')
+    m = re.search(r'"videoId":"([\w-]{11})"', page)
+    return (m.group(1), None) if m else (None, None)
+
+
+def play_video(query, incognito="no"):
+    """Find a video/song on YouTube and start playing it (optionally in a private window)."""
+    q = (query or "").strip()
+    if len(q.split()) > 9 or re.search(r"\b(tab|already|right now|currently|that was playing|was playing|opened|is playing)\b", q, re.I):
+        return ("NOT DONE: that isn't a song name - the user means something ALREADY open. Use media_control (play / resume) "
+                "for what's already open, or ask which song to play.")
+    vid, title = _youtube_first(query)
+    inc = _yes(incognito)
+    if not vid:
+        where = _browse("https://www.youtube.com/results?search_query=" + urllib.parse.quote_plus(query), inc)
+        return f"Couldn't read YouTube's results, so I opened the search for '{query}' in {where}. It is NOT playing yet."
+    where = _browse(f"https://www.youtube.com/watch?v={vid}", inc)
+    return f"Playing '{title or query}' on YouTube in {where}."
+
+
+def open_incognito(url=""):
+    """Private / incognito browser window, optionally at a web address."""
+    u = url.strip()
+    if u and not re.match(r"https?://", u):
+        u = "https://" + u
+    where = _browse(u or "about:blank", True)
+    return f"Opened {where}" + (f" at {u}." if u else ".")
+
+
+def play_music(query, incognito="no"):
     no_spotify = any("spotify" in f.lower() and re.search(r"(don'?t|do not|never|\bno\b|avoid|stop)", f.lower())
                      for f in load_json(MEMORY, []))
-    if not no_spotify:
+    generic = re.fullmatch(r"\s*(play\s+)?(a |the |some |any |background |nice |good |random |new )*(music|songs?|tunes|something)\s*",
+                           query.lower() or "music")
+    if generic:
+        query = "relaxing background music" if "background" in query.lower() else "top hits songs"
+    if _yes(incognito):
+        return play_video(query, "yes")
+    if not no_spotify and find_app("spotify"):
         try:
-            os.startfile("spotify:search:" + urllib.parse.quote(query)); return f"Searching Spotify for {query}."
+            os.startfile("spotify:search:" + urllib.parse.quote(query)); return f"Opened Spotify's search for {query} (press play there)."
         except OSError:
             pass
-    webbrowser.open("https://music.youtube.com/search?q=" + urllib.parse.quote_plus(query))
-    return f"Opened YouTube Music for {query}."
+    return play_video(query)
 
 
 def _key(vk, times=1):
@@ -547,22 +631,137 @@ def _key(vk, times=1):
         ctypes.windll.user32.keybd_event(vk, 0, 0, 0); ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
 
 
-def set_volume(direction):
-    d = direction.lower()
-    if "mute" in d or d in ("off", "0"):
-        _key(0xAD); return "Toggled mute."
-    if any(w in d for w in ("down", "lower", "decrease", "quiet", "less")):
-        _key(0xAE, 5); return "Volume down."
-    _key(0xAF, 5); return "Volume up."
+def _endpoint_volume():
+    try:
+        import comtypes
+        comtypes.CoInitialize()
+    except Exception:
+        pass
+    from pycaw.pycaw import AudioUtilities
+    return AudioUtilities.GetSpeakers().EndpointVolume
+
+
+def set_volume(direction="", level=""):
+    """Speaker volume: up / down / mute / unmute / exact level (0-100). Reports the real level."""
+    d = f"{direction} {level}".lower()
+    num = re.search(r"\d+", d)
+    try:
+        v = _endpoint_volume()
+        cur = round(v.GetMasterVolumeLevelScalar() * 100)
+    except Exception:
+        v = None
+    if v is None:                               # fallback: media keys (2% per press)
+        if "mute" in d:
+            _key(0xAD); return "Toggled mute."
+        if any(w in d for w in ("down", "lower", "decrease", "quiet", "less")):
+            _key(0xAE, 5); return "Volume down."
+        _key(0xAF, 5); return "Volume up."
+    if num:
+        target = max(0, min(100, int(num.group())))
+    elif "unmute" in d:
+        v.SetMute(0, None); return f"Unmuted. Volume is {cur}%."
+    elif "mute" in d:
+        v.SetMute(1, None); return f"Muted (volume was {cur}%)."
+    elif any(w in d for w in ("what", "current", "get", "level?")):
+        return f"Volume is {cur}%" + (" (muted)." if v.GetMute() else ".")
+    elif any(w in d for w in ("down", "lower", "decrease", "quiet", "less", "reduce")):
+        target = max(0, cur - 10)
+    else:
+        target = min(100, cur + 10)
+    v.SetMute(0, None)
+    v.SetMasterVolumeLevelScalar(target / 100, None)
+    return f"Volume set to {target}% (it was {cur}%)."
+
+
+# ======================================================== Jarvis's own settings (the app plugs in APP["set"])
+APP = {"set": None}
+_THEME_WORDS = {"crimson": "crimson", "red": "crimson", "ember": "crimson", "emerald": "emerald", "green": "emerald", "jade": "emerald",
+                "glass": "glass", "clear": "glass", "transparent": "glass", "silver": "glass", "white": "glass", "default": "glass"}
+
+
+def jarvis_settings(setting, value):
+    """Change Jarvis itself: theme/colour, speaking speed, spoken replies, wake word, follow-up listening."""
+    if not APP["set"]:
+        return "Error: settings are only available inside the Jarvis app."
+    k, v = setting.lower(), str(value).lower().strip()
+    if re.search(r"colou?r|theme|look|skin", k):
+        theme = next((t for w, t in _THEME_WORDS.items() if w in v), None)
+        if not theme:
+            return "Error: themes are Glass, Emerald (green) and Crimson (red)."
+        return APP["set"]("theme", theme)
+    if re.search(r"speed|fast|slow|pace|rate", k + " " + v):
+        return APP["set"]("speech_speed", v)
+    onoff = not re.search(r"\b(off|no|false|disable|stop|mute)\b", v)
+    if re.search(r"wake|hey jarvis", k):
+        return APP["set"]("wake", onoff)
+    if re.search(r"follow", k):
+        return APP["set"]("followup", onoff)
+    if re.search(r"voice|speak|spoken|talk|read aloud", k):
+        return APP["set"]("voice", onoff)
+    return "Error: I can change: theme (glass/emerald/crimson), speaking speed, spoken replies, wake word, follow-up listening."
+
+
+APP_DIR = Path(__file__).resolve().parent
+
+
+def _ps_file(script, *args, timeout=30):
+    r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(APP_DIR / script), *args],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+    return (r.stdout or "").strip()
 
 
 def media_control(action):
-    a = action.lower()
-    vk, msg = ((0xB0, "Skipped to the next track.") if "next" in a or "skip" in a else
-               (0xB1, "Went back to the previous track.") if "prev" in a or "back" in a else
-               (0xB2, "Stopped playback.") if "stop" in a else (0xB3, "Toggled play/pause."))
+    """Music/video ALREADY open anywhere (a Chrome tab, Spotify...), via Windows' media controls - so it controls the real
+    tab and reports what actually happened. Falls back to the keyboard media keys."""
+    a = (action or "").lower()
+    act = ("list" if re.search(r"status|what|now playing|which|list", a) else "next" if re.search(r"next|skip", a) else
+           "previous" if re.search(r"prev|back|last track", a) else "stop" if "stop" in a else "pause" if "pause" in a else
+           "play" if re.search(r"play|resume|continue|unpause|start", a) else "toggle")
+    try:
+        out = _ps_file("winrt_media.ps1", "-Action", act, timeout=15)
+    except Exception:
+        out = ""
+    if out.startswith("NONE"):
+        return "Nothing is open that plays music or video right now (no media tab or app). Ask the user what to play."
+    if out and act == "list":
+        rows = [r.split("\t") for r in out.splitlines()]
+        return "Media open now: " + "; ".join(f"{(r[2] if len(r) > 2 and r[2] != 'A site is playing media' else 'a browser tab')} "
+                                             f"in {r[1] if len(r) > 1 else '?'} ({r[0].lower()})" for r in rows)
+    if out and "\t" in out:
+        ok, status, app, title = (out.split("\t") + ["", "", "", ""])[:4]
+        name = "the media" if not title or title == "A site is playing media" else f"'{title}'"
+        where = "Chrome" if "chrome" in app.lower() else app
+        verb = {"play": "Resumed", "pause": "Paused", "stop": "Stopped", "next": "Skipped to the next item in",
+                "previous": "Went back in", "toggle": "Toggled"}[act]
+        if ok.lower() != "true":
+            return f"Error: Windows wouldn't {act} {name} in {where}. It is {status.lower()}."
+        return f"{verb} {name} in {where}. It is now {status.lower()}."
+    vk, msg = ((0xB0, "Pressed the next-track key.") if act == "next" else (0xB1, "Pressed the previous-track key.") if act == "previous"
+               else (0xB2, "Pressed the stop key.") if act == "stop" else (0xB3, "Pressed the play/pause key."))
     _key(vk)
-    return msg
+    return msg + " (couldn't check what is playing)"
+
+
+def read_screen(window=""):
+    """Read the text visible on screen with Windows' built-in offline OCR. Read-only: never clicks, nothing is saved or sent."""
+    w = (window or "").strip()
+    if w.lower() in ("active", "current", "front", "foreground", "my screen", "screen", "whole screen", "everything", "all"):
+        w = "screen" if w.lower() in ("screen", "whole screen", "everything", "all", "my screen") else ""
+    try:
+        out = _ps_file("winrt_ocr.ps1", *(["-Window", w] if w else []), timeout=40)
+    except Exception as e:
+        return f"Error: couldn't read the screen ({e})."
+    note = ""
+    if out.startswith("NO WINDOW") and w and w != "screen":     # misheard name ("clod" for Claude) -> the window in front
+        note = f"(No window has '{w}' in its title, so this is the window in front.) "
+        out = _ps_file("winrt_ocr.ps1", timeout=40)
+    if not out or out.startswith(("NO WINDOW", "NO OCR")):
+        return out or "Error: couldn't read the screen."
+    lines = out.splitlines()
+    title = lines[0].replace("WINDOW: ", "")
+    body = "\n".join(l for l in lines[1:] if len(l.strip()) > 1)
+    return (note + f"Text visible in the window '{title}' (read by OCR, may contain small mistakes):\n" + (body or "(no readable text)"))[:MAX_OUT]
 
 
 def screenshot():
@@ -635,6 +834,9 @@ def read_notes():
 
 
 def set_reminder(text, time):
+    if re.fullmatch(r"\s*(now|right now|immediately|asap|right away|this moment)\s*", str(time).lower()):
+        return ("Not set: a reminder for 'now' is pointless - the user wants this done NOW. Do the task itself with the right tool "
+                "(e.g. play_video / play_music / open_app) instead of a reminder.")
     when = parse_time(time)
     if not when:
         return f"Could not understand the time '{time}'. Ask the user for a time like '7 pm' or 'in 20 minutes'."
@@ -716,6 +918,10 @@ def complete_task(item, list_name="to-do"):
 # ======================================================== memory, skills
 def remember(fact):
     facts = load_json(MEMORY, [])
+    m = re.match(r"(User's name is|User likes to be called|User lives in|User's [\w ]+? is) ", fact)
+    if m and fact not in facts:          # a new name/city/favourite replaces the old one
+        facts = [f for f in facts if not f.startswith(m.group(0))]
+        save_json(MEMORY, facts)
     if fact not in facts:
         facts.append(fact)
         save_json(MEMORY, facts)
@@ -844,10 +1050,23 @@ TOOLS = {t["name"]: t for t in [
     _fn("open_app", "Open an app (or its website if not installed).", open_app, name="app name"),
     _fn("close_app", "Close a running app (user approves).", close_app, name="app name, e.g. notepad, chrome"),
     _fn("open_url", "Open a website in the browser.", open_url, url="web address"),
-    _fn("play_music", "Search and play music.", play_music, query="song, artist or genre"),
-    _fn("media_control", "Control the music/video that is playing: pause, play, next, previous, stop.", media_control,
-        action="pause, play, next, previous or stop"),
-    _fn("set_volume", "Speaker volume: up, down or mute.", set_volume, direction="up, down or mute"),
+    _fn("play_music", "Play music (YouTube; Spotify only if installed and allowed). For background music use query 'background music'.",
+        play_music, query="song, artist or genre", incognito="yes to play in a private/incognito window (optional)"),
+    _fn("play_video", "Play a song or video on YouTube right away (opens the video itself, it starts playing). "
+        "incognito='yes' plays it in a private/incognito window.", play_video, query="what to play", incognito="yes or no"),
+    _fn("open_incognito", "Open a private (incognito) browser window, optionally at a web address.", open_incognito,
+        url="web address (optional)"),
+    _fn("media_control", "Control music/video ALREADY open in any app or browser tab (YouTube in Chrome, Spotify...): play/resume, "
+        "pause, next, previous, stop, or status (what is open/playing). Use this - not play_video - to resume what is already open.",
+        media_control, action="play, pause, next, previous, stop or status"),
+    _fn("read_screen", "READ the text that is visible on screen (offline OCR; read-only, never clicks). For 'what's on my screen', "
+        "'read this', 'what does it say'. window = part of a window title; empty = the window in front; 'screen' = everything.",
+        read_screen, window="window title part, or empty (optional)"),
+    _fn("set_volume", "Speaker volume of the PC: up, down, mute, unmute, what it is now, or an exact level like 60.", set_volume,
+        direction="up, down, mute, unmute, set or what", level="exact percent 0-100 (optional)"),
+    _fn("jarvis_settings", "Change YOURSELF (Jarvis): theme/colour (glass, emerald=green, crimson=red), speaking speed "
+        "(faster, slower, normal), spoken replies on/off, wake word on/off, follow-up listening on/off.", jarvis_settings,
+        setting="theme, speech speed, voice, wake word or follow-up", value="e.g. crimson, faster, slower, on, off"),
     _fn("open_settings", "Open a Windows settings page (wifi, bluetooth, display, sound, storage, battery, update...).",
         open_settings, page="settings page"),
     _fn("screenshot", "Take a screenshot of the whole screen and save it.", screenshot),
@@ -856,8 +1075,8 @@ TOOLS = {t["name"]: t for t in [
     _fn("get_clipboard", "Read what is on the clipboard.", get_clipboard),
     _fn("chrome_profiles", "List Google Chrome profiles; can also open Chrome with one of them.", chrome_profiles,
         open_profile="profile name to open (optional)"),
-    _fn("desktop_look", "See what is on screen in an app window: its title and the names of its buttons, fields, menus and tabs. "
-        "Use before desktop_do.", desktop_look, window="app name or window title (empty = the active window)"),
+    _fn("desktop_look", "See the CONTROLS of an app window: its title and the names of its buttons, fields, menus and tabs "
+        "(not the text content - use read_screen to read). Use before desktop_do.", desktop_look, window="app name or window title (empty = the active window)"),
     _fn("desktop_do", "Operate an app on screen like a user. Give short steps, one per line: 'click <button name>', "
         "'type <text> in <field name>', 'enter <text> in <field>' (types + Enter), 'press ctrl+t', 'select <option> in <list>', "
         "'check <box>', 'scroll down', 'open <app>', 'focus <app>', 'wait 2', 'read <element>'. A fast executor runs them and reports.",

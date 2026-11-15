@@ -57,7 +57,7 @@ INTENTS = {
     "apps": {"ex": ["open notepad", "launch chrome", "start spotify", "open youtube", "close notepad", "open google.com"],
              "tools": ["open_app", "close_app", "open_url"]},
     "music": {"ex": ["play some music", "play Arijit Singh songs", "put on lofi", "pause the music", "next song", "previous track"],
-              "tools": ["play_music", "media_control"]},
+              "tools": ["play_music", "play_video", "media_control"]},
     "device": {"ex": ["volume up", "turn it down", "mute", "take a screenshot", "lock my computer", "open bluetooth settings", "copy this to clipboard", "what's on my clipboard",
                       "open display settings"], "tools": ["set_volume", "screenshot", "lock_pc", "open_settings", "set_clipboard", "get_clipboard"]},
     "reminders": {"ex": ["remind me to call mom at 7", "set a timer for 10 minutes", "wake me up at 6", "what reminders do I have",
@@ -80,6 +80,8 @@ INTENTS = {
 }
 CORE_TOOLS = ["web_search", "run_python", "run_command", "remember", "use_skill", "save_skill"]
 KEYWORD_TOOLS = [
+    (r"\b(on|in|of) (my |the |this )?(screen|window|page|tab)\b|\bwhat (do you see|does it say|is written)\b|\bread (this|it|the screen|my screen)\b",
+     ["read_screen"]),
     (r"\b(news|headlines?)\b", ["get_news", "web_search"]),
     (r"\b(weather|rain|temperature|forecast|humid)", ["get_weather"]),
     (r"\b(rupees?|dollars?|euros?|pounds?|yen|usd|inr|eur|currency|exchange rate)\b", ["convert_currency"]),
@@ -89,6 +91,10 @@ KEYWORD_TOOLS = [
     (r"\b(installed|browsers?)\b", ["installed_apps"]),
     (r"\b(remind|reminder|timer|alarm)\b", ["set_reminder", "set_timer", "list_reminders", "cancel_reminder"]),
     (r"\b(skill|routine)\b", ["save_skill", "use_skill"]),
+    (r"\b(your (voice|colou?r|theme|speed|look|settings)|(talk|speak)(ing)? (faster|slower|speed))\b", ["jarvis_settings"]),
+    (r"\bvolume\b", ["set_volume"]),
+    (r"\b(youtube|video|song|music|play)\b", ["play_video", "play_music", "media_control"]),
+    (r"\b(incognito|private (window|mode|tab)|inprivate)\b", ["open_incognito", "play_video"]),
     (r"\b(my system|this system|my pc|my computer|my laptop)\b", ["system_info"]),
     (r"\b(profiles?)\b.*\bchrome\b|\bchrome\b.*\bprofiles?\b", ["chrome_profiles"]),
     (r"\b(click|tap|press the|type .* in|on (my )?screen|window|tab|menu|button|scroll)\b", ["desktop_look", "desktop_do"]),
@@ -101,15 +107,100 @@ def _app_slot(t):
     return m.group(1).strip() if m else None
 
 
+_NUMS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+                                    "sixteen seventeen eighteen nineteen".split())}
+_NUMS.update({w: 10 * (i + 2) for i, w in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split())})
+_NUMS["hundred"] = 100; _NUMS["full"] = 100; _NUMS["max"] = 100; _NUMS["maximum"] = 100; _NUMS["half"] = 50
+
+
+def spoken_number(t):
+    """'to sixty five' / 'at 60%' / 'to max' -> 65 / 60 / 100 (only after to/at/is/= so 'turn it up' isn't a number)."""
+    m = re.search(r"\b(?:to|at|is|=|of)\s+(?:about\s+|around\s+|more or less\s+)?(\d{1,3})\s*%?", t)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\b(?:to|at|is|of)\s+(?:about\s+|around\s+|more or less\s+)?([a-z]+)(?:[\s-]+([a-z]+))?", t)
+    if m and m.group(1) in _NUMS:
+        n = _NUMS[m.group(1)]
+        if m.group(2) in _NUMS and n >= 20 and _NUMS[m.group(2)] < 10:
+            n += _NUMS[m.group(2)]
+        return n
+    return None
+
+
+def self_command(text):
+    """Commands about Jarvis itself / the user's identity, answered without the LLM."""
+    t = text.strip().lower().rstrip(".!? ")
+    m = re.search(r"\b(?:change|switch|set|make|turn)\s+(?:your|the|jarvis'?s?)?\s*(?:colou?r|theme|look|skin)?\s*(?:to|into)\s+(?:the\s+)?(\w+)", t) \
+        or re.search(r"\b(?:use|go|switch to)\s+(?:the\s+)?(glass|emerald|crimson)\b", t)
+    if m and re.search(r"colou?r|theme|look|skin|glass|emerald|crimson", t):
+        return "jarvis_settings", {"setting": "theme", "value": m.group(1)}
+    if re.search(r"\b(talk|speak|talking|speaking|voice|speech|reply|replies)\b", t) and \
+            re.search(r"\b(fast(er)?|quick(er)?|slow(er)?|speed|pace|rate)\b", t):
+        v = "slower" if re.search(r"\b(slow(er)?|decrease|reduce|lower|down)\b", t) else \
+            "normal" if re.search(r"\b(normal|default|reset)\b", t) else "faster"
+        return "jarvis_settings", {"setting": "speech speed", "value": v}
+    return None
+
+
+def my_name():
+    from tools import load_json, MEMORY
+    for f in load_json(MEMORY, []):
+        m = re.match(r"User's name is (.+?)\.?$", f)
+        if m:
+            return m.group(1)
+    return None
+
+
+def media_command(text):
+    """'open chrome in incognito mode and play Play with Fire on YouTube' -> ('play_video', {...}); 'open incognito' -> open_incognito."""
+    t = re.sub(r"[.!?]+$", "", text.strip())
+    # something ALREADY open ("play the music that was playing before", "resume", "play that tab") -> resume it, don't search
+    if re.search(r"\b(resume|continue|unpause)\b.{0,30}\b(music|song|video|playing|it|that)\b|^(?:please\s+)?(?:resume|unpause)\b"
+                 r"|\bplay\b.{0,40}\b(was playing|playing before|that was on|already (open|playing)|(that|the|my) (tab|window))\b"
+                 r"|\b(tab|window)\b.{0,80}\b(is |was )?playing\b|\b(music|song|video) (is |was )?(already )?playing (right now|already)\b", t, re.I):
+        return "media_control", {"action": "play"}
+    if re.fullmatch(r"(?:(?:can|could|would) you |please |jarvis,? )*(?:play|put on|start) (?:some |any |a little )?(?:background |nice |relaxing |good |calm )?"
+                    r"(?:music|songs?|tunes)(?: in the background| for me| please| now)*", t, re.I):
+        return "play_music", {"query": "background music"}
+    inc = bool(re.search(r"\b(incognito|in ?private|private (mode|window|tab))\b", t, re.I))
+    m = re.search(r"\bplay(?:\s+the)?(?:\s+(?:song|video|track))?\s+(.+?)\s+(?:on|in|from)\s+youtube\b", t, re.I) \
+        or (re.search(r"\byoutube\b", t, re.I) and re.search(r"\bplay(?:\s+the)?(?:\s+(?:song|video|track))?\s+(.+?)$", t, re.I))
+    if m:
+        q = re.sub(r"\s+(?:in|on)\s+(?:an?\s+)?(?:incognito|private)(?:\s+(?:mode|window|tab))?.*$", "", m.group(1), flags=re.I)
+        q = re.sub(r"\b(?:on|in|from)\s+youtube\b|\bsong\b$", "", q, flags=re.I).strip(" ,'\"")
+        if q and not re.fullmatch(r"(it|something|anything|music|a song|songs)", q, re.I):
+            return "play_video", {"query": q, "incognito": "yes" if inc else "no"}
+    if inc:
+        m = re.search(r"\bplay(?:\s+(?:me|us))?\s+(.+)$", t, re.I)
+        if m:
+            q = re.sub(r"\s+(?:in|on|with|using)\s+(?:an?\s+|the\s+)?(?:incognito|private|inprivate)\b.*$", "", m.group(1), flags=re.I)
+            q = re.sub(r"\b(?:in|on)\s+(?:google\s+)?chrome\b.*$|\b(?:on|in|from)\s+youtube\b", "", q, flags=re.I).strip(" ,'\"")
+            if re.fullmatch(r"(?:a|the|some|any|random|me)?\s*(?:song|music|songs|video|something)?", q, re.I):
+                q = "top hits songs"
+            return "play_video", {"query": q, "incognito": "yes"}
+    if inc and re.fullmatch(r"(?:please\s+)?(?:open|start|launch)?\s*(?:google\s+)?(?:chrome|browser|a)?\s*(?:in\s+)?(?:an?\s+)?"
+                            r"(?:incognito|private|inprivate)(?:\s+(?:mode|window|tab))?(?:\s+(?:in\s+)?chrome)?", t, re.I):
+        return "open_incognito", {}
+    return None
+
+
 def _direct(text):
     """Return (tool, args, say) for a clear simple command, else None."""
     t = text.strip().lower().rstrip(".!? ")
     sk = skill_trigger(text)
     if sk:
         return "_skill", {"name": sk[0], "steps": sk[1]}, None
+    med = self_command(text) or media_command(text)
+    if med:
+        return med[0], med[1], None
     dsk = desktop_command(text)
     if dsk:
         return "_desktop", dsk, None
+    if re.fullmatch(r"\W*(?:um+|uh+)?\W*(what'?s|what is|do you know|tell me|say) my name\W*", text.strip().lower()):
+        n = my_name()
+        acct = Path.home().name
+        return "_calc", {"answer": f"You're {n}." if n else
+                         f"You haven't told me yet. Your Windows account is called {acct} - is that you? Say \"my name is ...\" and I'll remember it."}, None
     ans = calc(text)
     if ans:
         return "_calc", {"answer": ans}, None
@@ -128,6 +219,10 @@ def _direct(text):
         return None
     if re.search(r"\b(mute|unmute)\b", t):
         return "set_volume", {"direction": "mute"}, None
+    if re.search(r"\b(volume|sound)\b", t):
+        lvl = spoken_number(t)
+        if lvl is not None and 0 <= lvl <= 100:
+            return "set_volume", {"direction": "set", "level": str(lvl)}, None
     if re.search(r"\b(volume|sound|louder|quieter)\b", t) or re.fullmatch(r"turn it (up|down)", t):
         if re.search(r"\b(down|lower|decrease|quieter|reduce|less)\b", t):
             return "set_volume", {"direction": "down"}, None
@@ -159,7 +254,7 @@ def _direct(text):
     if app and len(app.split()) <= 4:
         if re.search(r"\.[a-z]{2,}(/|$)", app):
             return "open_url", {"url": app}, None
-        if not re.search(r"\b(file|folder|document|my mind|up|account)\b", app.lower()):
+        if not re.search(r"\b(file|folder|document|my mind|up|account|incognito|private|mode)\b", app.lower()):
             from tools import find_app
             if find_app(app):
                 return "open_app", {"name": app}, None
