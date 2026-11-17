@@ -691,6 +691,14 @@ def jarvis_settings(setting, value):
         return APP["set"]("theme", theme)
     if re.search(r"speed|fast|slow|pace|rate", k + " " + v):
         return APP["set"]("speech_speed", v)
+    if re.search(r"accent|voice type|different voice|which voice|your voice|sound like|male|female|british|american|alan|ryan|lessac|northern", k + " " + v) \
+            and not re.fullmatch(r"(on|off|yes|no|true|false|enable|disable|enabled|disabled|mute|unmute)", v):
+        pick = ("en_GB-northern_english_male-medium" if "northern" in v else "en_US-ryan-high" if re.search(r"ryan|american male|us male|richer", v)
+                else "en_GB-alan-medium" if re.search(r"alan|british|uk|english male|male", v)
+                else "en_US-lessac-medium" if re.search(r"lessac|female|woman|default|original|american|us\b", v) else None)
+        if not pick:
+            return "Error: voices are Lessac (US), Alan (British male), Northern (British male), Ryan (US male)."
+        return APP["set"]("speaker_voice", pick)
     onoff = not re.search(r"\b(off|no|false|disable|stop|mute)\b", v)
     if re.search(r"wake|hey jarvis", k):
         return APP["set"]("wake", onoff)
@@ -698,7 +706,8 @@ def jarvis_settings(setting, value):
         return APP["set"]("followup", onoff)
     if re.search(r"voice|speak|spoken|talk|read aloud", k):
         return APP["set"]("voice", onoff)
-    return "Error: I can change: theme (glass/emerald/crimson), speaking speed, spoken replies, wake word, follow-up listening."
+    return ("Error: I can change: theme (glass/emerald/crimson), speaking speed, my voice (Lessac, Alan, Northern, Ryan), "
+            "spoken replies, wake word, follow-up listening.")
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -1065,7 +1074,8 @@ TOOLS = {t["name"]: t for t in [
     _fn("set_volume", "Speaker volume of the PC: up, down, mute, unmute, what it is now, or an exact level like 60.", set_volume,
         direction="up, down, mute, unmute, set or what", level="exact percent 0-100 (optional)"),
     _fn("jarvis_settings", "Change YOURSELF (Jarvis): theme/colour (glass, emerald=green, crimson=red), speaking speed "
-        "(faster, slower, normal), spoken replies on/off, wake word on/off, follow-up listening on/off.", jarvis_settings,
+        "(faster, slower, normal), which voice you speak with (Lessac US, Alan British male, Northern British male, Ryan US male), "
+        "spoken replies on/off, wake word on/off, follow-up listening on/off.", jarvis_settings,
         setting="theme, speech speed, voice, wake word or follow-up", value="e.g. crimson, faster, slower, on, off"),
     _fn("open_settings", "Open a Windows settings page (wifi, bluetooth, display, sound, storage, battery, update...).",
         open_settings, page="settings page"),

@@ -206,7 +206,16 @@ $("#trainBtn").onclick = () => { $("#trainBtn").disabled = true; api.train_voice
 $("#voiceBtn").onclick = () => api.set_setting("voice", !settings.voice);
 document.querySelectorAll(".toggle").forEach((t) => (t.onclick = () => api.set_setting(t.dataset.set, !settings[t.dataset.set])));
 
+document.querySelectorAll("#speedList .vpick").forEach((b) => (b.onclick = () => api.set_setting("speech_speed", +b.dataset.speed)));
+
 function renderSettings(e) {
+  const vl = $("#voiceList");
+  if (vl && e.voices) {
+    vl.innerHTML = Object.entries(e.voices).map(([k, v]) => `<button class="vpick${k === e.current_voice ? " on" : ""}" data-v="${esc(k)}">${esc(v)}</button>`).join("");
+    vl.querySelectorAll(".vpick").forEach((b) => (b.onclick = () => { vl.querySelectorAll(".vpick").forEach((x) => x.classList.remove("on")); b.classList.add("on"); b.textContent += " …"; api.set_setting("speaker_voice", b.dataset.v); }));
+  }
+  const sp = +(settings.speech_speed || 1);
+  document.querySelectorAll("#speedList .vpick").forEach((b) => b.classList.toggle("on", Math.abs(+b.dataset.speed - sp) < 0.08));
   document.querySelectorAll(".toggle").forEach((t) => t.classList.toggle("on", !!settings[t.dataset.set]));
   $("#voiceBtn").classList.toggle("on", !!settings.voice);
   $("#voiceState").textContent = e.voice_trained ? "Trained on your voice ✓ — run again any time to refresh it."

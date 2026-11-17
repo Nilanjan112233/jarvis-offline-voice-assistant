@@ -11,6 +11,14 @@ import sounddevice as sd
 
 VOICE_DIR = Path(__file__).resolve().parents[1] / "voice"
 PIPER_MODEL = VOICE_DIR / "piper" / "en_US-lessac-medium.onnx"
+# voices you can pick in Settings (all Piper: fast on this CPU - Kokoro/Kitten were tried and were too slow / skipped names)
+VOICES = {
+    "en_US-lessac-medium": "Lessac · US, clear",
+    "en_GB-alan-medium": "Alan · British male",
+    "en_GB-northern_english_male-medium": "Northern · British male",
+    "en_US-ryan-high": "Ryan · US male, richer (a bit slower)",
+}
+DEFAULT_VOICE = "en_US-lessac-medium"
 WHISPER_SERVER = VOICE_DIR / "whisper" / "Release" / "whisper-server.exe"
 WHISPER_MODEL = VOICE_DIR / "whisper" / "ggml-base.en-q8_0.bin"
 WHISPER_PORT = 8099
@@ -19,22 +27,36 @@ RATE = 16000
 
 # ================================================================ speaking
 class Speaker:
-    def __init__(self):
+    def __init__(self, voice_name=DEFAULT_VOICE):
         self.q = queue.Queue()
         self.stop_flag = threading.Event()
         self.voice = None
+        self.voice_name = None
         self.speed = 1.0            # 1.0 normal, 1.3 faster, 0.8 slower
-        try:
-            from piper import PiperVoice
-            self.voice = PiperVoice.load(str(PIPER_MODEL))
-            for _ in self.voice.synthesize("Hi."):   # warm-up: first call is slow
-                pass
-        except Exception as e:
-            print("Piper voice not available, using Windows voice:", e)
+        if not self.set_voice(voice_name) and voice_name != DEFAULT_VOICE:
+            self.set_voice(DEFAULT_VOICE)
+        if not self.voice:
+            print("Piper voice not available, using Windows voice")
         self.audio_q = queue.Queue()
         self._gen = 0                     # bumped by stop(): audio made before a stop is never played
         threading.Thread(target=self._loop, daemon=True).start()
         threading.Thread(target=self._play_loop, daemon=True).start()
+
+    def set_voice(self, name):
+        """Switch to another Piper voice (loads in ~1 s; the old one keeps talking until then)."""
+        path = VOICE_DIR / "piper" / f"{name}.onnx"
+        if name not in VOICES or not path.exists():
+            return False
+        try:
+            from piper import PiperVoice
+            v = PiperVoice.load(str(path))
+            for _ in v.synthesize("Hi."):     # warm-up: first call is slow
+                pass
+            self.voice, self.voice_name = v, name
+            return True
+        except Exception as e:
+            print("voice load failed:", e)
+            return False
 
     def say(self, text):
         text = re.sub(r"[*#`_>|]", "", text or "").strip()

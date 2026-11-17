@@ -1,4 +1,4 @@
-# Jarvis setup: downloads the engine, models and voice files (about 2.5 GB), checks every file's
+# Jarvis setup: downloads the engine, models and voice files (about 2.7 GB), checks every file's
 # SHA-256, creates a Python venv and installs the packages.
 # Run from the repo folder:   powershell -ExecutionPolicy Bypass -File setup.ps1
 
@@ -24,6 +24,19 @@ $Files = @(
     "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f"),
   @("$HF/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json", "$Root\voice\piper\en_US-lessac-medium.onnx.json",
     "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0"),
+  # more voices to pick from in Settings
+  @("$HF/rhasspy/piper-voices/resolve/main/en/en_GB/alan/medium/en_GB-alan-medium.onnx", "$Root\voice\piper\en_GB-alan-medium.onnx",
+    "0a309668932205e762801f1efc2736cd4b0120329622adf62be09e56339d3330"),
+  @("$HF/rhasspy/piper-voices/resolve/main/en/en_GB/alan/medium/en_GB-alan-medium.onnx.json", "$Root\voice\piper\en_GB-alan-medium.onnx.json",
+    "c0f0d124e5895c00e7c03b35dcc8287f319a6998a365b182deb5c8e752ee8c1e"),
+  @("$HF/rhasspy/piper-voices/resolve/main/en/en_GB/northern_english_male/medium/en_GB-northern_english_male-medium.onnx", "$Root\voice\piper\en_GB-northern_english_male-medium.onnx",
+    "57a219ae8e638873db7d18893304be5069c42868f392bb95c3ff17f0690d0689"),
+  @("$HF/rhasspy/piper-voices/resolve/main/en/en_GB/northern_english_male/medium/en_GB-northern_english_male-medium.onnx.json", "$Root\voice\piper\en_GB-northern_english_male-medium.onnx.json",
+    "69557ed3d974463453e9b0c09dd99a7ed0e52b8b87b64b357dbeeb2540a97d47"),
+  @("$HF/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx", "$Root\voice\piper\en_US-ryan-high.onnx",
+    "b3990d7606e183ec8dbfba70a4607074f162de1a0c412e0180d1ff60bb154eca"),
+  @("$HF/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx.json", "$Root\voice\piper\en_US-ryan-high.onnx.json",
+    "c6d3b98f08315cb4bebf0d49d50fc4ff491b503c64b940cd3d5ca28543b48011"),
   @("https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip", "$Dl\whisper-bin-x64.zip",
     "6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb"),
   @("$HF/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q8_0.bin", "$Root\voice\whisper\ggml-base.en-q8_0.bin",

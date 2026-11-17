@@ -206,7 +206,7 @@ class JarvisApp:
             return
         try:
             from voice import Speaker
-            self.speaker = Speaker()
+            self.speaker = Speaker(self.settings.get("speaker_voice") or "en_US-lessac-medium")
         except Exception as e:
             self.emit(type="toast", text=f"Spoken replies not available ({e}).")
         if self.speaker:
@@ -294,6 +294,13 @@ class JarvisApp:
         out.write("THEME: " + str(js("JSON.stringify({html: document.documentElement.dataset.theme, saved: true})")) +
                   f" settings={self.settings.get('theme')}\n")
         js(f"document.querySelector('[data-theme-pick={users_theme}]').click()"); time.sleep(0.5)   # back to the user's choice
+        # voice picker: switch to Alan, check, switch back to the user's voice
+        users_voice = self.settings.get("speaker_voice") or "en_US-lessac-medium"
+        n = js("document.querySelectorAll('#voiceList .vpick').length")
+        js("document.querySelector('#voiceList [data-v=\"en_GB-alan-medium\"]').click()"); time.sleep(3)
+        out.write(f"VOICES: shown={n} picked={getattr(self.speaker, 'voice_name', None)} saved={self.settings.get('speaker_voice')}\n")
+        self.set_setting("speaker_voice", users_voice); time.sleep(2)
+        out.flush()
         js("document.getElementById('backBtn').click()")
         # live caption + mic level events render
         self.emit(type="caption", text="open chrome in incognito mode and"); self.emit(type="level", v=0.6); time.sleep(0.3)
@@ -647,7 +654,12 @@ class JarvisApp:
 
     # ---------------- settings
     def push_settings(self):
+        try:
+            from voice import VOICES
+        except Exception:
+            VOICES = {}
         self.emit(type="settings", settings=self.settings, memory=tools.load_json(tools.MEMORY, []), skills=tools.list_skills(),
+                  voices=VOICES, current_voice=getattr(self.speaker, "voice_name", None),
                   voice_trained=VOICE_FILTER.exists(), stt=self.ears.stt.name if self.ears else None)
 
     def set_setting(self, key, value):
@@ -667,6 +679,21 @@ class JarvisApp:
             self.orb.set_theme(value)
         if key == "voice" and not value:
             self.hush()
+        if key == "speaker_voice":                # pick a different voice: switch, then say something in it
+            from voice import VOICES
+            if value not in VOICES or not self.speaker:
+                return self.push_settings()
+            def switch(v=value):
+                ok = self.speaker.set_voice(v)
+                if ok:
+                    self.hush()
+                    self.say("Hello. This is how I sound now.")
+                self.push_settings()
+            threading.Thread(target=switch, daemon=True).start()
+        if key == "speech_speed":
+            value = round(max(0.6, min(1.8, float(value))), 2)
+            if self.speaker:
+                self.speaker.speed = value
         self.settings[key] = value
         tools.save_json(SETTINGS_FILE, {k: v for k, v in self.settings.items() if k != "autostart"})
         self.push_settings()
@@ -687,6 +714,12 @@ class JarvisApp:
             tools.save_json(SETTINGS_FILE, {k: v for k, v in self.settings.items() if k != "autostart"})
             return f"Speaking speed set to {new}x (was {cur}x)."
         self.set_setting(key, value)
+        if key == "speaker_voice":
+            from voice import VOICES
+            if value not in VOICES:
+                return "Error: voices are " + ", ".join(VOICES.values())
+            self.set_setting(key, value)
+            return f"Voice changed to {VOICES[value]}."
         names = {"theme": "Theme", "voice": "Spoken replies", "wake": "Wake word", "followup": "Follow-up listening"}
         val = value if key == "theme" else ("on" if value else "off")
         return f"{names.get(key, key)} is now {val}."

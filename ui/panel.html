@@ -65,7 +65,11 @@
         <h2>Voice</h2>
         <div class="opt"><div class="l">Spoken replies<small>Jarvis reads answers aloud</small></div><button class="toggle on" data-set="voice"></button></div>
         <div class="opt"><div class="l">Wake word "Hey Jarvis"<small>Listens offline for the wake word only (~0.4% CPU). Nothing is kept until you say it.</small></div><button class="toggle on" data-set="wake"></button></div>
-        <div class="opt"><div class="l">Keep listening after answers<small>Ask a follow-up within ~5 s without saying "Hey Jarvis" again</small></div><button class="toggle on" data-set="followup"></button></div>
+        <div class="opt col"><div class="l">Jarvis's voice<small>Pick one - Jarvis says hello in it</small></div><div class="voices" id="voiceList"></div></div>
+        <div class="opt col"><div class="l">Speaking speed</div><div class="voices" id="speedList">
+          <button class="vpick" data-speed="0.85">Slower</button><button class="vpick" data-speed="1">Normal</button>
+          <button class="vpick" data-speed="1.2">Faster</button><button class="vpick" data-speed="1.4">Fastest</button></div></div>
+        <div class="opt"><div class="l">Keep listening after answers<small>~4 s for a follow-up, only in your voice; stops if someone else talks</small></div><button class="toggle on" data-set="followup"></button></div>
         <div class="opt"><div class="l">Teach Jarvis my voice<small id="voiceState">Say "Hey Jarvis" 10 times + read 4 lines (~1 min). Wakes more reliably, ignores other voices.</small></div><button class="chip" id="trainBtn">Start</button></div>
         <div class="train" id="train" hidden>
           <div class="tstep" id="tStep"></div>
