@@ -65,10 +65,12 @@ LFM3 writes faster but reads prompts slower, and its hybrid layers reuse the pro
 ## Features
 
 - **Voice, fully offline.** One always-open microphone for the wake word, the button and follow-ups, with live captions while you talk.
-  - **Wake word:** "Hey Jarvis" (openWakeWord) plus a fuzzy name check, so "Jervis" is accepted and "Hey, Java is…" is rejected.
+  - **Wake word:** "Hey Jarvis" (openWakeWord) plus a fuzzy name check, so "Jervis" is accepted and "Hey, Java is…" is rejected. The name works anywhere in the sentence ("open Notepad, Jarvis"), and a request said just before "Hey Jarvis" is still picked up. Weak wake-ups from background talk (an audiobook, the TV) stay silent unless the words really contain "Jarvis" in your voice.
   - **Owner voice (optional):** "Teach Jarvis my voice" trains a filter, and a speaker-ID check (WeSpeaker ResNet34) means other people and the TV can't wake it. Your voice scores 0.89–0.98, other voices 0.36–0.42.
   - **End of turn:** a pause after "and…" or "to…" doesn't cut you off. The end is decided by silence (Silero VAD), tone of voice (Smart Turn v3.2) and whether the sentence sounds finished.
-  - **Stop and queue:** "stop", "cancel" or "never mind" stops it mid-thought in 0.1–0.6 s. Requests made while it's busy wait in a queue. Its own voice is filtered out of what the mic hears.
+  - **Stop and queue:** "stop", "cancel" or "never mind" stops it mid-thought in 0.1–0.6 s, also while it's working or talking. Requests made while it's busy wait in a queue.
+  - **Echo cancellation:** WebRTC AEC3 removes Jarvis's own voice from the microphone (38–40 dB in my tests), so you can talk over it and say "stop" without the wake word.
+- **Voices:** four Piper voices to pick from in Settings (Lessac US, Alan British, Northern British, Ryan US) and a speaking-speed setting. You can also just say "use a British voice".
 - **Streaming replies.** Words appear about 1 s after a request. Finished sentences are spoken while the rest is still being written, but only after they pass the honesty checks.
 - **UI:** a floating particle-sphere orb in a native see-through window. It ripples with your voice, spins while thinking, shows progress while working, and pulses gold when it needs your OK. There are three themes (Emerald, Crimson, Glass) and a slide-out panel with a live timeline of each step, result cards (weather, PC stats, headlines, files, currency, world clock), in-panel Allow/Deny cards, history and settings. Global hotkey: Ctrl+Alt+J.
 - **53 tools:** web search, weather, news, currency, world time, PC/network info, installed apps, files (find, read, largest, sizes, write, move, delete to the Recycle Bin), sandboxed Python/PowerShell, exact volume, media control of the real Chrome/Spotify session, YouTube playback (also in incognito), Chrome profiles, settings, screenshot, lock, clipboard, reminders/timers, lists, notes, memory, learned "skills", and changing its own settings ("talk faster", "change your colour").
@@ -89,7 +91,7 @@ LFM3 writes faster but reads prompts slower, and its hybrid layers reuse the pro
 ```powershell
 git clone https://github.com/Nilanjan112233/jarvis-offline-voice-assistant
 cd jarvis-offline-voice-assistant
-powershell -ExecutionPolicy Bypass -File setup.ps1   # ~2.5 GB of engine/models/voice, SHA-256 checked
+powershell -ExecutionPolicy Bypass -File setup.ps1   # ~2.7 GB of engine/models/voice, SHA-256 checked
 .\run_jarvis.bat
 ```
 
@@ -107,8 +109,8 @@ Self-test (drives the real window end to end, read-only): `set JARVIS_SELFTEST=1
 | `app/agent.py` | the brain: persona, streamed LLM loop, code guards, auto-memory |
 | `app/router.py` | System-1 router: embeddings + rules, direct answers |
 | `app/tools.py` | the 53 tools |
-| `app/speech.py` | live listening: VAD, end-of-turn, streaming speech-to-text, wake word, owner-voice check |
-| `app/voice.py` | text-to-speech (Piper), whisper.cpp fallback |
+| `app/speech.py` | live listening: VAD, end-of-turn, streaming speech-to-text, wake word, owner-voice check, echo cancellation |
+| `app/voice.py` | text-to-speech (Piper voices), echo reference, whisper.cpp fallback |
 | `app/orb_native.py` | see-through orb window (per-pixel alpha, ctypes + numpy) |
 | `app/desktop.py` | desktop control executor |
 | `app/policy.py` | permission rules |
@@ -132,7 +134,8 @@ Code: MIT, see [LICENSE](LICENSE). Third-party parts are downloaded by `setup.ps
 | [Smart Turn v3.2](https://huggingface.co/pipecat-ai/smart-turn-v3) (Pipecat) | BSD-2-Clause |
 | [WeSpeaker](https://github.com/wenet-e2e/wespeaker) ResNet34 speaker model | Apache-2.0 |
 | [whisper.cpp](https://github.com/ggml-org/whisper.cpp) b5454 + base.en model (fallback) | MIT |
-| [Piper](https://github.com/rhasspy/piper) + en_US-lessac-medium voice | see the voice's model card |
+| [Piper](https://github.com/rhasspy/piper) + lessac, alan, northern_english_male and ryan voices | see each voice's model card |
+| [pywebrtc-audio](https://github.com/strands-labs/pywebrtc-audio) (WebRTC echo cancellation) | Apache-2.0 |
 | [openWakeWord](https://github.com/dscripka/openWakeWord) + `hey_jarvis` model | code Apache-2.0; pre-trained models CC BY-NC-SA 4.0 (non-commercial) |
 | [agent-desktop](https://github.com/vercel-labs/agent-desktop) v1.2.0 (Vercel Labs) | Apache-2.0 |
 | [pywebview](https://github.com/r0x0r/pywebview) | BSD-3-Clause |
