@@ -102,12 +102,35 @@ def split_wake(text):
         lw = w.lower()[:-2] if w.lower().endswith("'s") else w.lower()
         prev = next((x.lower() for x in reversed(words[:i]) if re.match(r"[A-Za-z']", x)), "")
         if (lw in WAKE_WORDS or difflib.SequenceMatcher(None, lw, "jarvis").ratio() >= 0.66
-                or re.search(r"[aeu]r+v[iea]s|[aeu]rbis|ervis", prev[-2:] + lw)):   # 'Page Arvis', 'Jervis'
+                or re.search(r"[aeu]r+v[iea]s|[aeu]rbis|ervis", prev[-2:] + lw)   # 'Page Arvis', 'Jervis'
+                or (lw in ("service", "servis", "services", "harvest", "jervice", "jarvice") and prev in ("hey", "hi", "a", "hay", "okay", "ok"))):
             tail = text[_offset_after(text, w, i, words):]
             return True, re.sub(r"^[\s,.!?:;-]+", "", tail).strip()
         seen += 1
         if seen >= 4:
             break
+    return False, ""
+
+
+_JARVIS_LIKE = re.compile(r"^(jarvis|jarvas|jervis|javis|jarvice|jervice|jarves|jarbis|jarvi|jarvish|charvis|garvis|jarvies|jaarvis)$")
+
+
+def find_jarvis(text):
+    """'open Notepad, Jarvis' / 'Jarvis, what's the time' / 'can you, Jarvis, check the weather' -> (True, request without
+    the name). 'Hey Service' at the start also counts (the usual mishearing). Not: 'Java', 'service desk', 'Travis Scott'."""
+    words = (text or "").split()
+    for i, w in enumerate(words):
+        lw = re.sub(r"[^a-z']", "", w.lower())
+        lw = lw[:-2] if lw.endswith("'s") else lw
+        prev = re.sub(r"[^a-z]", "", words[i - 1].lower()) if i else ""
+        if _JARVIS_LIKE.match(lw) or (len(lw) >= 5 and difflib.SequenceMatcher(None, lw, "jarvis").ratio() >= 0.8) \
+                or (i <= 1 and lw in ("service", "servis", "harvest") and prev in ("hey", "hi", "hay", "")):
+            rest = words[:i] + words[i + 1:]
+            if i >= 1 and re.fullmatch(r"\W*(hey|hi|hay|ok|okay|oh|hello)\W*", words[i - 1], re.I):
+                rest = words[:i - 1] + words[i + 1:]
+            cmd = re.sub(r"^[\s,.!?:;-]+|[\s,:;-]+$", "", " ".join(rest)).strip()
+            cmd = re.sub(r"\s+([,.!?])", r"\1", cmd)
+            return True, cmd
     return False, ""
 
 
@@ -125,8 +148,8 @@ def wake_command(text):
               'when', 'why', 'is', 'are', 'please', 'show', 'search', 'find', 'start', 'stop', 'remind', 'call', 'send', 'take', 'go', 'do'}
     if i < len(w) and len(w) - i >= 2 and w[i].lower().strip(',.!?') not in COMMON:
         i += 1                                       # the misheard 'Jarvis'
-    elif i == 0 and len(w) == 1:
-        return ""                                    # a single word = just the (misheard) name
+    elif len(w) - i <= 1:
+        return ""                                    # 'Hey Service' / a single word = just the (misheard) name
     return re.sub(r"^[\s,.!?:;-]+", "", " ".join(w[i:]))
 
 
@@ -223,6 +246,9 @@ def is_stop(text):
     t = re.sub(r"[^a-z' ]", " ", (text or "").lower()).split()
     if not t:
         return False
+    # "top top" = "stop stop" with the 's' clipped (common while Jarvis is talking): only stop-ish words in the phrase
+    if set(t) <= {"top", "stop", "stopp", "sop", "stap", "jarvis", "hey", "please", "now", "it", "that", "this", "okay", "ok", "no"} and {"top", "stop", "stopp", "sop", "stap"} & set(t):
+        return True
     hits = len(_STOP_TOKEN.findall(" ".join(t)))
     if hits >= 2:
         return True
@@ -250,7 +276,8 @@ _FEEDBACK = re.compile(r"\b(you|your|you're|didn'?t|did not|doesn'?t|isn'?t|wasn
 def looks_like_request(text):
     """Follow-up listening: does this sound like it's said TO Jarvis (a question/command, or a reply/correction about what
     it just did), not to someone else in the room?"""
-    t = (text or "").strip()
+    t = re.sub(r"[,.!;:]+", " ", (text or "")).strip()
+    t = re.sub(r"\s+", " ", t)
     return bool(t) and (bool(_REQUEST.match(t)) or bool(re.search(r"\bjarvis\b|\?\s*$", t, re.I))
                         or bool(_FEEDBACK.search(" ".join(t.split()[:6]))))
 
