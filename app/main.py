@@ -230,7 +230,9 @@ class JarvisApp:
         out = open(tools.DATA / "selftest.log", "w", encoding="utf-8")
         out.write(f"VOICE: speaker={bool(self.speaker)} ears={bool(self.ears and self.ears.running)} "
                   f"stt={self.ears.stt.name if self.ears else None} wake={bool(self.ears and self.ears.wake_on)} "
-                  f"voice_filter={bool(self.ears and self.ears.verified)}\n"); out.flush()
+                  f"voice_filter={bool(self.ears and self.ears.verified)} "
+                  f"echo_cancel={bool(self.ears and self.ears.aec is not None and self.ears.far is not None)} "
+                  f"voice_id={bool(self.ears and self.ears.voice_id is not None)}\n"); out.flush()
         js = lambda code: self.panel.evaluate_js(code)
         def wait_idle(timeout=120):
             t0 = time.time()
@@ -428,7 +430,7 @@ class JarvisApp:
         if self.no_followup:
             self.no_followup = False
             return
-        if (self.ears and self.settings.get("followup") and self.last_via in ("wake", "button", "followup")
+        if (self.ears and self.settings.get("followup") and self.last_via in ("wake", "button", "followup", "ambient")
                 and not self.busy and self.state == "idle" and self.ears.mode == "idle"):
             time.sleep(0.25)             # let the speaker's echo die away
             self.set_state("listening", "Listening for a follow-up…")
@@ -474,6 +476,9 @@ class JarvisApp:
             self.ears.paused = lambda: self.training or self.state in ("waiting", "starting")
             self.ears.speaking = lambda: bool(self.speaker and self.speaker.busy())
             self.ears.recent_spoken = lambda: [x for t, x in self.said_log if time.time() - t < 90]
+            self.ears.busy = lambda: bool(self.busy)
+            from voice import FAR
+            self.ears.far = FAR.take             # echo cancellation reference (what Jarvis is playing)
             self.ears.expecting_answer = lambda: self.last_answer.rstrip().endswith("?")
             self._load_voice_id()
             self.ears.start()

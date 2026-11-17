@@ -25,6 +25,38 @@ WHISPER_PORT = 8099
 RATE = 16000
 
 
+# ================================================================ what Jarvis is playing (for the echo canceller)
+class FarEnd:
+    """Keeps the sound Jarvis is playing right now (16 kHz), so the mic side can remove it again (echo cancellation)."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.audio, self.t0 = None, 0.0
+
+    def play(self, audio, rate):
+        a = np.asarray(audio, dtype=np.float32)
+        if rate != RATE and len(a):
+            a = np.interp(np.arange(0, len(a), rate / RATE), np.arange(len(a)), a)
+        with self.lock:
+            self.audio, self.t0 = a.astype(np.int16), time.monotonic()
+
+    def take(self, n, t_end):
+        """The n samples that were playing up to time t_end (None if nothing was playing)."""
+        with self.lock:
+            a, t0 = self.audio, self.t0
+        if a is None:
+            return None
+        end = int((t_end - t0) * RATE); start = end - n
+        if end <= 0 or start >= len(a):
+            return None
+        out = np.zeros(n, dtype=np.int16)
+        lo, hi = max(start, 0), min(end, len(a))
+        out[lo - start:hi - start] = a[lo:hi]
+        return out
+
+
+FAR = FarEnd()
+
+
 # ================================================================ speaking
 class Speaker:
     def __init__(self, voice_name=DEFAULT_VOICE):
@@ -86,6 +118,7 @@ class Speaker:
         notes = {"wake": (880, 1320), "off": (990, 660)}[kind]
         tone = np.concatenate([np.sin(2 * np.pi * f * t) * np.hanning(len(t)) for f in notes])
         try:
+            FAR.play((tone * 0.22 * 32767).astype(np.int16), sr)
             sd.play((tone * 0.22 * 32767).astype(np.int16), sr)
         except Exception:
             pass
@@ -123,6 +156,7 @@ class Speaker:
                                     "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak($input)"],
                                    input=audio, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
                 else:
+                    FAR.play(audio, rate)
                     sd.play(audio, rate)
                     while sd.get_stream().active:
                         if gen != self._gen:

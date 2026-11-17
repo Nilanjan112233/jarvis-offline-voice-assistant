@@ -430,6 +430,18 @@ class Ears:
         self.recent_spoken = lambda: []  # app: what Jarvis said in the last ~90 s (to remove its own echo)
         self.expecting_answer = lambda: False   # app: True when Jarvis just asked the user a question
         self.voice_id, self.voice_threshold = None, 0.60
+        # echo cancellation (WebRTC AEC3): removes what Jarvis is playing from the mic. app sets far = voice.FAR.take
+        self.far, self.aec, self.aec_until = None, None, 0.0
+        try:
+            from pywebrtc_audio import AudioProcessor   # AEC3 + light noise suppression (tested best at normal volume)
+            self.aec = AudioProcessor(sample_rate=RATE, num_channels=1, echo_cancellation=True, noise_suppression=True,
+                                      auto_gain_control=False, ns_level=1, stream_delay_ms=120)
+        except Exception:
+            self.aec = None
+        self.barge = None                # while Jarvis talks: listening for YOU saying "stop" (needs the echo canceller)
+        self.busy = lambda: False        # app: True while Jarvis is working on a request
+        self.amb, self.amb_pre = None, []  # "Jarvis" anywhere: what you're saying right now (your voice only)
+        self.lag_logged = 0.0
 
     # ---------------- setup
     def load_wake(self, verifier_path=None):
@@ -461,11 +473,31 @@ class Ears:
             except Exception as e:
                 print("ears event error:", e)
 
+    def clean(self, chunk, t):
+        """Echo cancellation: take out what Jarvis was playing at time t. Runs only while Jarvis talks (+0.5 s echo tail),
+        so normal listening is never changed."""
+        if self.aec is None or self.far is None:
+            return chunk
+        far = self.far(len(chunk), t)
+        if far is not None:
+            self.aec_until = t + 0.5
+        elif t > self.aec_until:
+            return chunk
+        try:
+            return self.aec.process(chunk, far if far is not None else np.zeros(len(chunk), np.int16))
+        except Exception:
+            return chunk
+
     def _process(self):
         while self.running:
-            chunk = self.audio_q.get()
+            item = self.audio_q.get()
+            chunk, t = item if isinstance(item, tuple) else (item, time.monotonic())
+            lag = time.monotonic() - t
+            if lag > 1.0 and time.monotonic() - self.lag_logged > 10:
+                self.lag_logged = time.monotonic()
+                self._log(f"listening is {lag:.1f}s behind (PC busy)")
             try:
-                self.feed(chunk)
+                self.feed(self.clean(chunk, t), raw=chunk)
             except Exception as e:
                 self._emit("error", text=f"Listening problem: {e}")
 
@@ -535,14 +567,16 @@ class Ears:
                         data, overflow = st.read(self.CHUNK)
                         if overflow:
                             self._log("mic overflow (audio lost)")
-                        self.audio_q.put(data[:, 0].copy())
+                        self.audio_q.put((data[:, 0].copy(), time.monotonic()))
             except Exception as e:
                 self._emit("error", text=f"Microphone problem: {e}")
                 time.sleep(3)
 
-    def feed(self, chunk):
-        """80 ms of int16 audio (from the mic, or from a file in tests)."""
+    def feed(self, chunk, raw=None):
+        """80 ms of int16 audio (from the mic, or from a file in tests). chunk = echo-cancelled; raw = straight from the mic
+        (the wake-word model works better on the raw sound - tested - and the voice check stops Jarvis waking itself)."""
         with self.lock:
+            self._raw = chunk if raw is None else raw
             self.clock += len(chunk) / RATE
             if self.mode == "record":
                 self._record(chunk)
@@ -551,19 +585,132 @@ class Ears:
             else:
                 self._wake(chunk)
 
+    def _barge(self, chunk):
+        """While Jarvis is talking (echo removed): if YOU say 'stop', stop it - no 'Hey Jarvis' needed."""
+        f = chunk.astype(np.float32) / 32768.0
+        if self.barge is None:
+            self.barge = dict(s=self.stt.new(), audio=[], t0=self.clock, done=False)
+        b = self.barge
+        b["audio"] = (b["audio"] + [f])[-25:]          # last 2 s
+        self.stt.feed(b["s"], f)
+        if b["done"]:
+            return
+        words = strip_echo(self.stt.text(b["s"]), self.recent_spoken(), min_run=3).split()
+        tail = " ".join(words[-4:])
+        if tail and is_stop(tail):
+            vs = self.voice_id.score(np.concatenate(b["audio"])) if self.voice_id is not None else None
+            self._log(f"barge-in: heard {tail!r} while talking (voice {vs})")
+            if vs is None or vs >= self.voice_threshold - 0.1:
+                b["done"] = True
+                self._emit("cancel", reason="stop", via="barge")
+            else:
+                self.barge = None                         # not you (or Jarvis's own echo): start fresh
+
+    AMB_MAX = 20.0      # longest stretch of talk it follows
+
+    def _ambient(self, chunk):
+        """Always listening for YOU saying 'Jarvis' anywhere ('open Notepad, Jarvis'), and 'stop' while it works.
+        Only your voice is transcribed (checked after 1 s of speech) - other people / TV are never written down."""
+        f = chunk.astype(np.float32) / 32768.0
+        self.vad.accept_waveform(f)
+        speech = self.vad.is_speech_detected()
+        while not self.vad.empty():
+            self.vad.pop()
+        a = self.amb
+        if a is None:
+            self.amb_pre = (self.amb_pre + [f])[-5:]          # 0.4 s before you start
+            if speech:
+                self.amb = dict(audio=list(self.amb_pre), t0=self.clock, last=self.clock, speech_s=0.0, ok=None, s=None)
+            return
+        a["audio"].append(f)
+        if speech:
+            a["last"] = self.clock; a["speech_s"] += len(f) / RATE
+        if a["ok"] is None and a["speech_s"] >= 1.0:          # is it you?
+            vs = self.voice_id.score(np.concatenate(a["audio"]))
+            a["ok"] = vs is not None and vs >= self.voice_threshold
+            if a["ok"]:
+                a["s"] = self.stt.new()
+                for x in a["audio"]:
+                    self.stt.feed(a["s"], x)
+        elif a["ok"]:
+            self.stt.feed(a["s"], f)
+        quiet = self.clock - a["last"]
+        need = 1.0
+        if a["ok"] and quiet >= 0.6 and ends_unfinished(self.stt.text(a["s"])):
+            need = 2.0
+        if a["ok"] is False:
+            if quiet >= 0.6 or self.clock - a["t0"] > self.AMB_MAX:
+                self.amb = None; self.amb_pre = []            # someone else: forget it
+            return
+        if quiet < need and self.clock - a["t0"] <= self.AMB_MAX:
+            return
+        self.amb, self.amb_pre = None, []
+        if a["ok"] is None:                                   # short (< 1 s of speech): 'stop', 'Jarvis', 'Jarvis stop'
+            audio = np.concatenate(a["audio"])
+            vs = self.voice_id.score(audio)
+            # short words are hard to tell apart by voice (another man's "stop" scored 0.72, yours 0.77-0.85):
+            # a slightly lower bar, so YOUR stop always works; clearly different voices are still ignored
+            if vs is not None and vs < self.voice_threshold - 0.05:
+                return
+            s = self.stt.new()
+            for x in a["audio"]:
+                self.stt.feed(s, x)
+            text = self.stt.finish(s)
+        else:
+            text = self.stt.finish(a["s"])
+        if self.clock - a["t0"] > self.AMB_MAX:
+            return                                            # a long talk (with someone else) - not a request
+        text = fix_words(strip_echo((text or "").strip(), self.recent_spoken()))
+        found, cmd = find_jarvis(text)
+        if self.busy() and (is_stop(text) or (found and is_stop(cmd))):
+            self._log(f"[ambient] heard {text!r} while working -> stop")
+            return self._emit("cancel", reason="stop", via="ambient")
+        if not found:
+            if text:
+                self._log(f"[ambient] {text!r} - no 'Jarvis', not for me")
+                if looks_like_request(text):          # '<request> ... (pause) ... Hey Jarvis' -> this was for Jarvis
+                    self.last_owner = (self.clock, text)
+            return
+        self._log(f"[ambient] heard {text!r} -> request {cmd!r}")
+        self._emit("wake", interrupt=False)
+        if not cmd:
+            cmd = self._take_last_owner(a["t0"])
+            if cmd:
+                return self._emit("final", text=cmd, via="ambient")
+        if not cmd:                                           # just "Jarvis" -> listen for the request
+            self._begin("button", None)
+            return
+        self._emit("final", text=cmd, via="ambient")
+
     def _wake(self, chunk):
+        if self.aec is not None and self.far is not None and self.speaking() and self.voice_id is not None:
+            self._barge(chunk)
+        elif self.barge is not None:
+            self.barge = None
+        if self.voice_id is not None and self.wake_on and not self.speaking() and not self.paused():
+            self._ambient(chunk)
+            if self.mode != "idle":
+                return
+        elif self.amb is not None:
+            self.amb = None
         self.ring.append(chunk)
         self.ring = self.ring[-25:]                  # last 2 s
         speaking = self.speaking()
         if not self.wake_on or self.paused() or (speaking and not self.verified) or self.clock < getattr(self, "wake_quiet_until", 0):
             self.wake_model.reset()
             return
-        score = self.wake_model.predict(chunk)["hey_jarvis"]
-        need = self.sensitivity if not speaking else max(0.7, self.sensitivity)
+        score = self.wake_model.predict(getattr(self, "_raw", chunk))["hey_jarvis"]
+        need = self.sensitivity if not speaking or self.voice_id is not None else max(0.7, self.sensitivity)
         if score < need:
             return
         self.wake_model.reset()
         prefix = np.concatenate(self.ring)[-int(RATE * 1.8):]
+        a = self.amb
+        if a is not None and a.get("ok") is not False and a["audio"]:
+            # you were already talking ('What's the weather today, hey Jarvis'): keep the whole sentence, not just the name
+            said = (np.concatenate(a["audio"]) * 32768).astype(np.int16)[-int(RATE * 12):]
+            if len(said) > len(prefix):
+                prefix = said
         self.ring = []
         vs = None
         if self.voice_id is not None:               # is it YOUR voice saying it? (TV, other people, Jarvis's own speech -> no)
@@ -574,7 +721,8 @@ class Ears:
         if vs is not None and vs < self.voice_threshold:
             self._log(f"wake ignored (score {score:.2f}, not your voice {vs:.2f})")
             return
-        strong = score >= max(self.STRONG, need)
+        # clear wake-up AND (your voice confirmed, or no voice check set up) -> answer at once; otherwise wait silently
+        strong = score >= max(self.STRONG, need) and (vs is not None or self.voice_id is None)
         self._log(f"wake (score {score:.2f}{'' if strong else ', checking for Jarvis'}{'' if vs is None else f', voice {vs:.2f}'})")
         if strong:
             self._emit("wake", interrupt=speaking)
@@ -583,6 +731,7 @@ class Ears:
         self.cap["interrupt"] = speaking
 
     def _begin(self, kind, prefix):
+        self.amb, self.amb_pre = None, []
         self.vad.reset()
         self.cap = dict(kind=kind, s=self.stt.new(), audio=[], t0=self.clock, last_speech=None, heard=False,
                         need=None, partial="", wake_at=self.clock, restarted=False)
@@ -603,7 +752,7 @@ class Ears:
             c["speech_s"] = c.get("speech_s", 0.0) + len(f) / RATE
         text = self.stt.text(c["s"])
         if c.get("tentative"):                      # weak wake: stay invisible until the words contain "Jarvis"
-            if split_wake(text)[0]:
+            if split_wake(text)[0] or find_jarvis(text)[0]:
                 vs = self._voice(c)
                 if vs is not None and vs < self.voice_threshold:
                     self._log(f"   'Jarvis' heard, but not your voice ({vs:.2f})")
@@ -662,6 +811,15 @@ class Ears:
         if (need is not None and quiet >= need) or now - c["t0"] > self.MAXLEN[c["kind"]]:
             self._end(self.stt.finish(c["s"]), None)
 
+    def _take_last_owner(self, since):
+        """Your request from just before (within 2 s) that didn't contain the name - used when the name came after a pause."""
+        lo = getattr(self, "last_owner", None)
+        self.last_owner = None
+        if lo and 0 <= since - lo[0] <= 2.0:
+            self._log(f"   using what you said just before: {lo[1]!r}")
+            return lo[1]
+        return ""
+
     def _voice(self, c):
         if self.voice_id is None or not c or not c["audio"]:
             return None
@@ -679,6 +837,9 @@ class Ears:
         dur = self.clock - c["t0"] if c else 0
         self._log(f"[{kind}] {dur:.1f}s heard={text!r} reason={reason} turn={c.get('turn_p') if c else None}")
         if text is None:
+            if c and c.get("tentative") and self.voice_id is not None and self.wake_on:
+                # a weak trigger that didn't hear "Jarvis" yet: keep following what you say (the name may come later)
+                self.amb = dict(audio=list(c["audio"]), t0=c["t0"], last=self.clock, speech_s=c.get("speech_s", 0.0), ok=None, s=None)
             return self._emit("cancel", reason=reason, via=kind, silent=bool(c and c.get("tentative")))
         if kind == "wake" and c.get("tentative"):
             return self._emit("cancel", reason="false wake", via=kind, silent=True)
@@ -690,8 +851,12 @@ class Ears:
         if kind == "wake":
             if not split_wake(text)[0] and not self.verified:
                 return self._emit("cancel", reason="false wake", via=kind)
-            text = wake_command(text)
+            found, cmd = find_jarvis(text)                 # 'open Notepad, Jarvis' works too, not only 'Hey Jarvis, ...'
+            text = cmd if found else wake_command(text)
             if not text.strip() and not c.get("restarted"):
+                said = self._take_last_owner(c["wake_at"])    # '<request>... Hey Jarvis' with a pause in between
+                if said:
+                    return self._emit("final", text=said, via="wake")
                 # only "Hey Jarvis" -> keep listening for the request (no new wake word needed)
                 self._begin("button", None)
                 self.cap["restarted"] = True
