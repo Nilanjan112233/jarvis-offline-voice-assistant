@@ -27,10 +27,12 @@ def parse_time(text, now=None):
     day = now.date()
     if "tomorrow" in t:
         day = day + timedelta(days=1)
+    weekday_named = False
     for i, d in enumerate(DAYS):
         if d in t or re.search(rf"\b{d[:3]}\b", t):
-            ahead = (i - now.weekday()) % 7 or 7
-            day = now.date() + timedelta(days=ahead)
+            # "Friday 10am" said on Friday at 9 = today; if that time has passed, next week (handled below)
+            day = now.date() + timedelta(days=(i - now.weekday()) % 7)
+            weekday_named = True
             break
 
     hour = minute = None
@@ -54,7 +56,7 @@ def parse_time(text, now=None):
         hour, minute = 18, 0
     elif "night" in t:
         hour, minute = 21, 0
-    elif day != now.date():
+    elif day != now.date() or weekday_named:
         hour, minute = 9, 0
     else:
         return None
@@ -65,5 +67,5 @@ def parse_time(text, now=None):
         if m and not m.group(3) and hour < 12 and when + timedelta(hours=12) > now:
             when += timedelta(hours=12)
         else:
-            when += timedelta(days=1)
+            when += timedelta(days=7 if weekday_named else 1)
     return when
