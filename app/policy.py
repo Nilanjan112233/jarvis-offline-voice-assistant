@@ -1,4 +1,3 @@
-import re
 """Safety guardrails for actions. Enforced in CODE, not by the model.
 
   SAFE    - runs straight away: anything that only LOOKS (read files, list folders, read-only commands,
@@ -22,7 +21,7 @@ TOOL_RISK = {
     # additions: look-only or small & easy to undo
     "world_time": SAFE, "network_info": SAFE, "installed_apps": SAFE, "largest_files": SAFE, "read_notes": SAFE,
     "list_reminders": SAFE, "cancel_reminder": SAFE, "snooze_reminder": SAFE, "set_timer": SAFE, "add_task": SAFE, "list_tasks": SAFE,
-    "complete_task": SAFE, "media_control": SAFE, "screenshot": SAFE, "lock_pc": SAFE,
+    "complete_task": SAFE, "screenshot": SAFE, "lock_pc": SAFE,
     "set_clipboard": SAFE, "get_clipboard": SAFE,
     "chrome_profiles": SAFE, "desktop_look": SAFE,
     "desktop_do": SAFE,   # the executor itself asks before clicking send/delete/buy/confirm-type buttons
@@ -59,7 +58,7 @@ WRITE_SIGNS = re.compile(r"(>|\bout-file\b|\bset-content\b|\badd-content\b|::\s*
 READ_ONLY_METHODS = {"tostring", "trim", "trimstart", "trimend", "split", "replace", "tolower", "toupper", "substring", "contains",
                      "startswith", "endswith", "indexof", "lastindexof", "gettype", "equals", "padleft", "padright", "compareto",
                      "where", "foreach", "getfiles", "getdirectories", "getfilesysteminfos", "getvalue", "getvaluenames",
-                     "getsubkeynames", "tostring", "join", "format", "count", "length", "keys", "values", "tolowerinvariant",
+                     "getsubkeynames", "join", "format", "count", "length", "keys", "values", "tolowerinvariant",
                      "toupperinvariant", "normalize", "isnullorempty", "isnullorwhitespace", "getenvironmentvariable"}
 READ_ONLY_STATIC = READ_ONLY_METHODS | {
     "now", "today", "utcnow", "round", "floor", "ceiling", "abs", "max", "min", "pow", "sqrt", "parse", "tryparse", "exists",

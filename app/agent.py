@@ -21,12 +21,13 @@ for _n, _t in tools.TOOLS.items():                              # your plugins (
 
 ROOT = Path(__file__).resolve().parents[1]          # repo root; setup.ps1 fills engine/ and models/
 SERVER = ROOT / "engine" / "llama-server.exe"
-import os
 # model A/B tests can swap the brain: JARVIS_LLM=<gguf path>, JARVIS_DRAFT=<mtp gguf or empty for none>
 MODEL = Path(os.environ.get("JARVIS_LLM") or ROOT / "models" / "gemma-4-E2B-en50v-Q4_0.gguf")
 DRAFT = os.environ.get("JARVIS_DRAFT", str(ROOT / "models" / "mtp-gemma-4-E2B-en50v-Q4_0.gguf"))
 PORT = 8098
 KV_DIR = ROOT / "data" / "kvcache"   # the brain's saved warm-up (fast start)
+# first start reads ~2.5 GB from disk: on a slow/cold disk that alone took 2+ minutes in testing
+START_TIMEOUT = float(os.environ.get("JARVIS_START_TIMEOUT", "300"))
 
 
 def _lower_priority(pid):
@@ -324,6 +325,18 @@ class Agent:
 
     # ---------------------------------------------------- engine
     def start(self):
+        """Start the model engine + router. On any failure both are stopped again (no orphan llama-server left
+        holding the ports), and the error says what is missing."""
+        missing = [p for p in (SERVER, MODEL, *([Path(DRAFT)] if DRAFT else [])) if not Path(p).exists()]
+        if missing:
+            raise FileNotFoundError("missing " + ", ".join(str(p) for p in missing) + " - run setup.ps1 first")
+        try:
+            return self._start()
+        except BaseException:
+            self.stop()
+            raise
+
+    def _start(self):
         t0 = time.time()
         log = open(self.log_path, "w", encoding="utf-8")
         KV_DIR.mkdir(parents=True, exist_ok=True)
@@ -336,7 +349,7 @@ class Agent:
         self.proc = launch()
         _lower_priority(self.proc.pid)                 # the ears and the screen always come first (listening never falls behind)
         self.router.start()
-        while time.time() - t0 < 120:
+        while time.time() - t0 < START_TIMEOUT:
             if self.proc.poll() is not None:
                 if self.vision:                        # the image encoder wouldn't load: start without eyes
                     self.vision = False
@@ -350,7 +363,8 @@ class Agent:
                         return time.time() - t0
             except urllib.error.URLError:
                 time.sleep(0.4)
-        raise TimeoutError("model engine did not start")
+        raise TimeoutError(f"model engine did not start within {START_TIMEOUT:.0f} s - see {self.log_path} "
+                           "(set JARVIS_START_TIMEOUT for a slower PC)")
 
     def _slot(self, action, filename):
         req = urllib.request.Request(f"http://127.0.0.1:{PORT}/slots/0?action={action}", data=json.dumps({"filename": filename}).encode(),
