@@ -60,8 +60,35 @@ def _path(p):
 
 
 # ======================================================== web (background)
+SEARCH_BLOCKED = re.compile(r"anomaly|challenge-form", re.I)   # DuckDuckGo's "are you a bot?" page
+
+
+def _wiki_search(query, n=3):
+    """Wikipedia's own search API (no key). Fallback when DuckDuckGo refuses automated searches."""
+    words = re.sub(r"\b(who|what|when|where|which|why|how|is|are|was|were|the|a|an|in|of|and|did|does|do|current|"
+                   r"currently|latest|today|now|right|please|tell|me|search|find|year|old)\b|[?,.!]", " ", query, flags=re.I)
+    words = " ".join(words.split()) or query
+    q = urllib.parse.urlencode({"action": "query", "list": "search", "srsearch": words, "srlimit": n, "format": "json"})
+    hits = json.loads(_get(f"https://en.wikipedia.org/w/api.php?{q}"))["query"]["search"]
+    out = []
+    for i, h in enumerate(hits):
+        url = "https://en.wikipedia.org/wiki/" + urllib.parse.quote(h["title"].replace(" ", "_"))
+        line = f"- {h['title']}\n  {url}\n  {_text(h['snippet'])}"
+        if i == 0:                                   # the top article's intro: usually holds the answer
+            try:
+                s = json.loads(_get("https://en.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(h["title"].replace(" ", "_"))))
+                line += "\n  " + s.get("extract", "")[:900]
+            except Exception:
+                pass
+        out.append(line)
+    return "\n".join(out)
+
+
 def web_search(query):
-    page = _get("https://html.duckduckgo.com/html/", urllib.parse.urlencode({"q": query}).encode())
+    try:
+        page = _get("https://html.duckduckgo.com/html/", urllib.parse.urlencode({"q": query}).encode())
+    except Exception:                                # timeout / refused: treat like a blocked search
+        page = "challenge-form"
     links = re.findall(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', page, re.S)
     snips = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', page, re.S)
     out, urls = [], []
@@ -70,6 +97,19 @@ def web_search(query):
         urls.append(u)
         out.append(f"- {_text(t)}\n  {u}\n  {_text(s)}")
     if not out:
+        # Before: a bot-check page came back as "No results found." and the assistant told the user the facts
+        # didn't exist. Now: say search was blocked, and try Wikipedia instead.
+        blocked = bool(SEARCH_BLOCKED.search(page))
+        try:
+            wiki = _wiki_search(query)
+        except Exception:
+            wiki = ""
+        if wiki:
+            return (("Web search is blocked right now (DuckDuckGo asked for a bot check). " if blocked else "")
+                    + "Wikipedia results (may not have live prices or today's news):\n" + wiki)
+        if blocked:
+            return ("Error: web search is unavailable right now (DuckDuckGo blocked automated searches). Tell the user you "
+                    "couldn't search; don't say the information doesn't exist.")
         return "No results found."
     extracts = []
     for u in [u for u in urls if "duckduckgo.com" not in u][:2]:
