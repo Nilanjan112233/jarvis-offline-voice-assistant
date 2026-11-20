@@ -1,10 +1,23 @@
 # Jarvis setup: downloads the engine, models and voice files (about 2.7 GB), checks every file's
-# SHA-256, creates a Python venv and installs the packages.
+# SHA-256, creates a Python venv and installs the packages. Safe to run again: files that are
+# already there and match their SHA-256 are skipped.
 # Run from the repo folder:   powershell -ExecutionPolicy Bypass -File setup.ps1
+#   -Vision   also get the image encoder (557 MB) for look_at_screen / describe_image
+#   -Dev      also install pytest + ruff (requirements-dev.txt) to run the tests
+
+param([switch]$Vision, [switch]$Dev)
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # much faster Invoke-WebRequest
 $Root = $PSScriptRoot
+
+# Python 3.13 through the "py" launcher (python.org installer); the pinned wheels are for 3.13
+$py = Get-Command py -ErrorAction SilentlyContinue
+if (-not $py) { throw "The Python launcher 'py' was not found. Install Python 3.13 from python.org (tick 'py launcher')." }
+& py -3.13 -c "import sys" 2>$null
+if ($LASTEXITCODE -ne 0) { throw "Python 3.13 is needed (py -3.13 failed). Install it from python.org." }
+$free = (Get-PSDrive ((Resolve-Path $Root).Drive.Name)).Free / 1GB
+if ($free -lt 6) { Write-Warning ("Only {0:N1} GB free on this drive; setup needs about 6 GB (downloads + unpacked)." -f $free) }
 $Dl = Join-Path $Root "downloads"
 New-Item -ItemType Directory -Force $Dl, "$Root\engine", "$Root\models", "$Root\voice\piper", "$Root\voice\whisper", "$Root\voice\models", "$Root\bin" | Out-Null
 
@@ -53,6 +66,11 @@ $Files = @(
   @("$SO/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx", "$Root\voice\models\wespeaker_resnet34_LM.onnx",
     "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012")
 )
+if ($Vision) {
+  # Gemma 4 E2B's own image encoder (ggml-org); the trimmed text model can use it unchanged
+  $Files += ,@("$HF/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/mmproj-gemma-4-E2B-it-Q8_0.gguf", "$Root\models\mmproj-gemma-4-E2B-it-Q8_0.gguf",
+    "042cc2561806cd3b5cb5efb25cab76911e3100c43cc09d854904f921924b1429")
+}
 
 foreach ($f in $Files) {
   $url, $out, $sha = $f
@@ -72,9 +90,20 @@ Expand-Archive "$Dl\whisper-bin-x64.zip" "$Root\voice\whisper" -Force
 tar -xzf "$Dl\agent-desktop.tar.gz" -C "$Root\bin"
 tar -xjf "$Dl\nemotron-stt.tar.bz2" -C "$Root\voice\models"
 
-if (-not (Test-Path "$Root\.venv")) { py -3.13 -m venv "$Root\.venv" }
-& "$Root\.venv\Scripts\python.exe" -m pip install --upgrade pip
-& "$Root\.venv\Scripts\python.exe" -m pip install -r "$Root\requirements.txt"
-& "$Root\.venv\Scripts\python.exe" -c "import openwakeword.utils as u; u.download_models(['hey_jarvis'])"
+function Invoke-Checked($what) {   # native programs don't stop the script on failure by themselves
+  & $args[0] $args[1..($args.Count - 1)]
+  if ($LASTEXITCODE -ne 0) { throw "$what failed (exit code $LASTEXITCODE)" }
+}
+$Py = "$Root\.venv\Scripts\python.exe"
+if (-not (Test-Path $Py)) { Invoke-Checked "creating the venv" py -3.13 -m venv "$Root\.venv" }
+Invoke-Checked "pip upgrade" $Py -m pip install --upgrade pip
+Invoke-Checked "installing requirements.txt" $Py -m pip install -r "$Root\requirements.txt"
+if ($Dev) { Invoke-Checked "installing requirements-dev.txt" $Py -m pip install -r "$Root\requirements-dev.txt" }
+Invoke-Checked "wake-word model download" $Py -c "import openwakeword.utils as u; u.download_models(['hey_jarvis'])"
 
-Write-Host "`nSetup done. Start Jarvis with run_jarvis.bat"
+# quick check that everything is where the app looks for it
+$need = "$Root\engine\llama-server.exe", "$Root\bin\agent-desktop.exe", "$Root\models\gemma-4-E2B-en50v-Q4_0.gguf"
+$need | Where-Object { -not (Test-Path $_) } | ForEach-Object { throw "missing after setup: $_" }
+if (-not (Get-ChildItem "$Root\voice\models" -Directory -Filter "sherpa-onnx-nemotron-*")) { throw "missing after setup: Nemotron speech model" }
+
+Write-Host "`nSetup done. Start Jarvis with run_jarvis.bat (the first start takes about a minute)."
