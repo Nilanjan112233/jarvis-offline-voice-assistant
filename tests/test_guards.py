@@ -83,3 +83,10 @@ def test_recall_chats_by_day(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "CHATS", chats)
     out = tools.recall_chats(query="weather", when="yesterday")
     assert "24" in out and "Rain" not in out
+
+
+def test_windows_name_does_not_use_wmi(monkeypatch):
+    # platform.version() can hang forever when the WMI service is stuck; the version must come from the kernel
+    import platform
+    monkeypatch.setattr(platform, "version", lambda: (_ for _ in ()).throw(AssertionError("WMI path used")))
+    assert tools._windows_name().startswith("Windows ")

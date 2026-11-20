@@ -3,7 +3,7 @@
 Most tools work in the background and return text for the model to read.
 On-screen tools (open_app, open_url, play_music, media keys, screenshot, lock) act on the PC directly.
 """
-import ctypes, html, json, os, platform, re, ssl, subprocess, sys, time, urllib.parse, urllib.request, webbrowser
+import ctypes, html, json, os, re, ssl, subprocess, sys, time, urllib.parse, urllib.request, webbrowser
 from ctypes import wintypes
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -185,11 +185,13 @@ def _screen_resolution():
 
 
 def _windows_name():
+    # sys.getwindowsversion() asks the kernel. platform.version() goes through WMI on Python 3.12+, and when the WMI
+    # service is stuck it never returns (seen 20 Nov: "which Windows version" froze the router).
     try:
-        build = int(platform.version().split(".")[-1])
+        build = sys.getwindowsversion().build
         return f"Windows {'11' if build >= 22000 else '10'} (build {build})"
     except Exception:
-        return platform.platform()
+        return "Windows (version unknown)"
 
 
 def system_info():
