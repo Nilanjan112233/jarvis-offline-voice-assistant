@@ -241,3 +241,8 @@ kbd { font-family: Consolas, monospace; font-size: 11.5px; background: var(--car
 .msg-you.queued { opacity: .6; background: transparent; color: var(--text); border: 1px solid var(--line-strong); box-shadow: none; }
 .msg-you.queued::before { content: "queued · "; color: var(--accent); font-size: 11px; letter-spacing: .5px; }
 .bubble.draft::after { content: " ▍"; color: var(--accent); animation: blink 1s steps(2) infinite; }
+
+/* earlier chats (restored after a restart) */
+.history { opacity: .55; }
+.history .bubble { font-size: 13px; }
+.history-line { text-align: center; font-size: 11px; color: var(--muted, #8aa); margin: 10px 0 14px; letter-spacing: .04em; }

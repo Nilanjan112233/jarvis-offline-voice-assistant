@@ -1,0 +1,11 @@
+# Example Jarvis plugin. Rename to example_dice.py and restart Jarvis to enable it.
+import random
+
+
+@tool("Roll dice and say the numbers.", risk="safe", count="how many dice, 1-10 (optional)")
+def roll_dice(count="1"):
+    try:
+        n = max(1, min(10, int(count or 1)))
+    except ValueError:
+        n = 1
+    return "Rolled: " + ", ".join(str(random.randint(1, 6)) for _ in range(n))

@@ -5,8 +5,13 @@ models/
 voice/
 bin/
 .venv/
-# personal runtime data: memory, notes, reminders, logs, browser cache
-data/
+# personal runtime data: memory, notes, reminders, chat history, logs, browser cache
+# (only the plugin folder's README and example are part of the repo)
+data/*
+!data/plugins/
+data/plugins/*
+!data/plugins/README.md
+!data/plugins/example_dice.py.off
 __pycache__/
 *.log
 *.gguf

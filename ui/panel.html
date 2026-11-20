@@ -78,6 +78,11 @@
           <div class="tbar"><b id="tBar"></b></div>
         </div>
         <div class="opt"><div class="l">Shortcut<small>Talk from anywhere</small></div><span><kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>J</kbd></span></div>
+        <div class="opt col"><div class="l">Reminder sound<small>Plays with the Windows notification and the spoken reminder</small></div><div class="voices" id="remSound">
+          <button class="vpick" data-rs="chime">Chime</button><button class="vpick" data-rs="melody">Melody</button><button class="vpick" data-rs="bell">Bell</button><button class="vpick" data-rs="beep">Beep</button><button class="vpick" data-rs="none">Silent</button></div></div>
+        <div class="opt col"><div class="l">Allow by voice<small id="codeState">Pick a secret code word. When Jarvis asks for your OK, say it (in your own voice) instead of clicking Allow. "No" or "deny" always declines. Empty = click only.</small></div>
+          <div class="voices"><input id="codeWord" type="password" placeholder="code word (4+ letters)" autocomplete="off" style="flex:1;min-width:0">
+          <button class="chip" id="codeSave">Save</button></div></div>
       </div>
       <div class="sec">
         <h2>Look</h2>

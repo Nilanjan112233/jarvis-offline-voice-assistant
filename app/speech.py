@@ -5,7 +5,7 @@
   STT        : NVIDIA Nemotron Speech Streaming EN 0.6B int8 (sherpa-onnx) -> words appear while you talk
                (Moonshine base EN as a light fallback / phone option)
 """
-import difflib, queue, re, threading, time
+import difflib, os, queue, re, threading, time
 from pathlib import Path
 
 import numpy as np
@@ -364,6 +364,54 @@ class VoiceID:
         return None if e is None else float(e @ self.me)
 
 
+class KeywordSpotter:
+    """sherpa-onnx open-vocabulary keyword spotting (zipformer, GigaSpeech, 3.3 M params, Apache-2.0): listens only for
+    the NAME 'Jarvis' anywhere in what you say. Much cheaper than writing down every sentence, and private: nothing you
+    say to other people is turned into text. Keywords: voice/models/kws-gigaspeech/jarvis_keywords.txt"""
+    DIR = MODELS / "kws-gigaspeech"
+
+    def __init__(self):
+        import sherpa_onnx
+        d = self.DIR
+        self.k = sherpa_onnx.KeywordSpotter(
+            tokens=str(d / "tokens.txt"), encoder=str(d / "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
+            decoder=str(d / "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
+            joiner=str(d / "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
+            keywords_file=str(d / "jarvis_keywords.txt"), num_threads=1, max_active_paths=4,
+            keywords_score=2.0, keywords_threshold=0.20, num_trailing_blanks=1, provider="cpu")
+        self.s = self.k.create_stream()
+        self.last_hit = -1e9
+
+    @classmethod
+    def load(cls):
+        try:
+            return cls() if (cls.DIR / "jarvis_keywords.txt").exists() else None
+        except Exception:
+            return None
+
+    def feed(self, f32, clock):
+        self.s.accept_waveform(RATE, f32)
+        while self.k.is_ready(self.s):
+            self.k.decode_stream(self.s)
+            if self.k.get_result(self.s):
+                self.last_hit = clock
+                self.k.reset_stream(self.s)
+
+    def heard_since(self, t):
+        return self.last_hit >= t
+
+
+def trim_log(path, max_bytes=500_000):
+    """Keep a log file small: past max_bytes, only the newest half is kept."""
+    try:
+        p = Path(path)
+        if p.exists() and p.stat().st_size > max_bytes:
+            data = p.read_bytes()[-max_bytes // 2:]
+            p.write_bytes(data[data.find(b"\n") + 1:])
+    except Exception:
+        pass
+
+
 def strip_echo(text, spoken, min_run=4):
     """Remove Jarvis's own words that the mic picked up from the speakers ('I need a little more information ... stop' -> 'stop').
     spoken: recent sentences Jarvis said. Drops any run of >= min_run words that appears in them."""
@@ -432,6 +480,7 @@ class Ears:
         self.voice_id, self.voice_threshold = None, 0.60
         # echo cancellation (WebRTC AEC3): removes what Jarvis is playing from the mic. app sets far = voice.FAR.take
         self.far, self.aec, self.aec_until = None, None, 0.0
+        self.far_hot, self.echo_clock = False, -1e9     # last audio time Jarvis's own voice was playing
         try:
             from pywebrtc_audio import AudioProcessor   # AEC3 + light noise suppression (tested best at normal volume)
             self.aec = AudioProcessor(sample_rate=RATE, num_channels=1, echo_cancellation=True, noise_suppression=True,
@@ -440,8 +489,13 @@ class Ears:
             self.aec = None
         self.barge = None                # while Jarvis talks: listening for YOU saying "stop" (needs the echo canceller)
         self.busy = lambda: False        # app: True while Jarvis is working on a request
+        self.expect_confirm = lambda: False  # app: True while an Allow/Deny popup waits (code word / "no" by voice)
         self.amb, self.amb_pre = None, []  # "Jarvis" anywhere: what you're saying right now (your voice only)
         self.lag_logged = 0.0
+        # Name spotter OFF by default: night test 18 Nov - the 3.3M GigaSpeech model mis-hears the owner's "Hey Jarvis"
+        # (0/10 clips, e.g. "HE'S ART OF HIS"), so it would silently drop requests. Set JARVIS_KWS=1 to try it.
+        self.kws = KeywordSpotter.load() if os.environ.get("JARVIS_KWS") == "1" else None
+        self.last_owner_audio = None       # your last sentence without the name, kept as sound (not text) for 2 s
 
     # ---------------- setup
     def load_wake(self, verifier_path=None):
@@ -476,12 +530,13 @@ class Ears:
     def clean(self, chunk, t):
         """Echo cancellation: take out what Jarvis was playing at time t. Runs only while Jarvis talks (+0.5 s echo tail),
         so normal listening is never changed."""
-        if self.aec is None or self.far is None:
+        if self.far is None:
             return chunk
         far = self.far(len(chunk), t)
         if far is not None:
             self.aec_until = t + 0.5
-        elif t > self.aec_until:
+        self.far_hot = far is not None                     # Jarvis's voice is playing in this chunk
+        if self.aec is None or (far is None and t > self.aec_until):
             return chunk
         try:
             return self.aec.process(chunk, far if far is not None else np.zeros(len(chunk), np.int16))
@@ -504,6 +559,7 @@ class Ears:
     def _log(self, line):
         if self.log_path:
             try:
+                trim_log(self.log_path)
                 with open(self.log_path, "a", encoding="utf-8") as f:
                     f.write(time.strftime("%H:%M:%S ") + line + "\n")
             except Exception:
@@ -578,6 +634,8 @@ class Ears:
         with self.lock:
             self._raw = chunk if raw is None else raw
             self.clock += len(chunk) / RATE
+            if self.far_hot:
+                self.echo_clock = self.clock
             if self.mode == "record":
                 self._record(chunk)
             elif self.mode == "capture":
@@ -616,6 +674,8 @@ class Ears:
         speech = self.vad.is_speech_detected()
         while not self.vad.empty():
             self.vad.pop()
+        if self.kws is not None:
+            self.kws.feed(f, self.clock)
         a = self.amb
         if a is None:
             self.amb_pre = (self.amb_pre + [f])[-5:]          # 0.4 s before you start
@@ -628,15 +688,16 @@ class Ears:
         if a["ok"] is None and a["speech_s"] >= 1.0:          # is it you?
             vs = self.voice_id.score(np.concatenate(a["audio"]))
             a["ok"] = vs is not None and vs >= self.voice_threshold
-            if a["ok"]:
+        if a["ok"]:
+            if a["s"] is None and self._transcribe_now(a):    # the name was heard (or it's working: "stop"?)
                 a["s"] = self.stt.new()
                 for x in a["audio"]:
                     self.stt.feed(a["s"], x)
-        elif a["ok"]:
-            self.stt.feed(a["s"], f)
+            elif a["s"] is not None:
+                self.stt.feed(a["s"], f)
         quiet = self.clock - a["last"]
         need = 1.0
-        if a["ok"] and quiet >= 0.6 and ends_unfinished(self.stt.text(a["s"])):
+        if a["ok"] and a["s"] is not None and quiet >= 0.6 and ends_unfinished(self.stt.text(a["s"])):
             need = 2.0
         if a["ok"] is False:
             if quiet >= 0.6 or self.clock - a["t0"] > self.AMB_MAX:
@@ -645,6 +706,13 @@ class Ears:
         if quiet < need and self.clock - a["t0"] <= self.AMB_MAX:
             return
         self.amb, self.amb_pre = None, []
+        if a["ok"] is not False and a["s"] is None and not self._transcribe_now(a):
+            # you talked, but the name never came: nothing is written down. The sound is kept 2 s in case
+            # "Hey Jarvis" follows ('<request> ... (pause) ... Hey Jarvis').
+            if self.clock - a["t0"] <= self.AMB_MAX and (a["ok"] or a["speech_s"] >= 0.5):
+                self.last_owner_audio = (self.clock, list(a["audio"]))
+            self._log(f"[ambient] {self.clock - a['t0']:.1f}s of talk, no 'Jarvis' heard - not for me (not transcribed)")
+            return
         if a["ok"] is None:                                   # short (< 1 s of speech): 'stop', 'Jarvis', 'Jarvis stop'
             audio = np.concatenate(a["audio"])
             vs = self.voice_id.score(audio)
@@ -652,22 +720,28 @@ class Ears:
             # a slightly lower bar, so YOUR stop always works; clearly different voices are still ignored
             if vs is not None and vs < self.voice_threshold - 0.05:
                 return
+            strong = vs is not None and vs >= self.voice_threshold
             s = self.stt.new()
             for x in a["audio"]:
                 self.stt.feed(s, x)
             text = self.stt.finish(s)
         else:
             text = self.stt.finish(a["s"])
+            strong = True                                     # a["ok"]: voice matched at the full bar
         if self.clock - a["t0"] > self.AMB_MAX:
             return                                            # a long talk (with someone else) - not a request
-        text = fix_words(strip_echo((text or "").strip(), self.recent_spoken()))
+        text = fix_words(strip_echo((text or "").strip(), self._echo_words(a["t0"])))
         found, cmd = find_jarvis(text)
         if self.busy() and (is_stop(text) or (found and is_stop(cmd))):
             self._log(f"[ambient] heard {text!r} while working -> stop")
             return self._emit("cancel", reason="stop", via="ambient")
+        if self.expect_confirm() and text:                    # an Allow/Deny is waiting: your words go to it
+            self._log(f"[ambient] reply to an Allow/Deny ({len(text.split())} words, voice {'ok' if strong else 'weak'})")
+            return self._emit("confirm_reply", text=text, strong=strong)
         if not found:
             if text:
-                self._log(f"[ambient] {text!r} - no 'Jarvis', not for me")
+                # privacy: what you say to other people is never written down - only that something was heard
+                self._log(f"[ambient] {len(text.split())} words, no 'Jarvis' - not for me")
                 if looks_like_request(text):          # '<request> ... (pause) ... Hey Jarvis' -> this was for Jarvis
                     self.last_owner = (self.clock, text)
             return
@@ -811,6 +885,20 @@ class Ears:
         if (need is not None and quiet >= need) or now - c["t0"] > self.MAXLEN[c["kind"]]:
             self._end(self.stt.finish(c["s"]), None)
 
+    def _echo_words(self, since):
+        """Jarvis's recent sentences, but only if its voice was playing at some point since `since` (audio time).
+        No speaker link (tests / no echo cancel) -> old behaviour: always check."""
+        if self.far is None or self.echo_clock >= since:
+            return self.recent_spoken()
+        return []
+
+    def _transcribe_now(self, a):
+        """Write down this stretch of YOUR talk only if the spotter heard 'Jarvis' in it, or Jarvis is working
+        (to catch 'stop'). No spotter model -> old behaviour (always)."""
+        if self.kws is None:
+            return True
+        return self.busy() or self.kws.heard_since(a["t0"] - 0.5)
+
     def _take_last_owner(self, since):
         """Your request from just before (within 2 s) that didn't contain the name - used when the name came after a pause."""
         lo = getattr(self, "last_owner", None)
@@ -818,6 +906,15 @@ class Ears:
         if lo and 0 <= since - lo[0] <= 2.0:
             self._log(f"   using what you said just before: {lo[1]!r}")
             return lo[1]
+        la, self.last_owner_audio = self.last_owner_audio, None
+        if la and 0 <= since - la[0] <= 2.0:                  # kept as sound only: transcribe it now
+            s = self.stt.new()
+            for x in la[1]:
+                self.stt.feed(s, x)
+            text = fix_words((self.stt.finish(s) or "").strip())
+            if text and looks_like_request(text):
+                self._log(f"   using what you said just before: {text!r}")
+                return text
         return ""
 
     def _voice(self, c):
@@ -861,7 +958,10 @@ class Ears:
                 self._begin("button", None)
                 self.cap["restarted"] = True
                 return self._emit("partial", text="")
-        text = fix_words(strip_echo(text.strip(), self.recent_spoken()))   # drop Jarvis's own words heard from the speakers
+        # drop Jarvis's own words heard from the speakers - only if it was actually talking while you spoke
+        # (else "set a reminder for ..." was cut from YOUR request because Jarvis had said those words earlier)
+        text = fix_words(strip_echo(text.strip(), self._echo_words(
+            (c["t0"] - (2.0 if kind == "wake" else 0.0)) if c else self.clock - 30)))
         bare = re.sub(r"[^a-z ]", "", text.lower()).strip()
         if not bare:
             return self._emit("cancel", reason="nothing heard", via=kind)

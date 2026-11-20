@@ -316,10 +316,55 @@ def run_command(command):
     return (out or f"(no output, exit code {r.returncode})")[:MAX_OUT]
 
 
-def run_python(code):
-    r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=180,
-                       creationflags=subprocess.CREATE_NO_WINDOW, cwd=str(Path.home()))
+# Runs before the model's Python code (unless the user pressed Allow). Python's audit hooks see every file open, delete,
+# rename, program start, network connection and native-code load - whatever trick the code uses to reach them.
+# Reading is fine; changing anything outside the temp folder is stopped and reported, so Jarvis can ask first.
+PY_GUARD = r"""
+import os as _o, sys as _s, tempfile as _t
+def _jarvis_guard():
+    tmp = _o.path.normcase(_o.path.realpath(_t.gettempdir()))
+    W = _o.O_WRONLY | _o.O_RDWR | _o.O_CREAT | _o.O_APPEND | _o.O_TRUNC
+    def in_tmp(p):
+        try:
+            p = _o.path.normcase(_o.path.abspath(_o.fsdecode(p)))
+        except Exception:
+            return False
+        return p == tmp or p.startswith(tmp + _o.sep)
+    PATH_EVENTS = {"os.remove", "os.rmdir", "os.rename", "os.mkdir", "os.chmod", "os.truncate", "os.link", "os.symlink",
+                   "shutil.rmtree", "shutil.copyfile", "shutil.copymode", "shutil.copystat", "shutil.move", "shutil.chown"}
+    BLOCK = ("subprocess.", "os.system", "os.exec", "os.spawn", "os.posix_spawn", "os.startfile", "os.kill", "os.fork",
+             "ctypes.", "socket.connect", "socket.sendto", "socket.bind", "urllib.Request", "_winapi.", "winreg.Create",
+             "winreg.Delete", "winreg.Set", "webbrowser.")
+    def hook(ev, args):
+        bad = None
+        if ev == "open" and args and not isinstance(args[0], int):
+            mode, flags = (args[1] if len(args) > 1 else None), (args[2] if len(args) > 2 else 0)
+            writing = (isinstance(mode, str) and any(c in mode for c in "wax+")) or (mode is None and (flags or 0) & W)
+            if writing and not in_tmp(args[0]):
+                bad = "write to " + _o.fsdecode(args[0])
+        elif ev in PATH_EVENTS:
+            target = args[1] if ev in ("os.rename", "shutil.copyfile", "shutil.move", "os.link", "os.symlink") and len(args) > 1 else args[0]
+            if not in_tmp(target) or (ev in ("os.rename", "shutil.move") and not in_tmp(args[0])):
+                bad = ev + " " + _o.fsdecode(str(target))
+        elif ev.startswith(BLOCK):
+            bad = ev
+        if bad:
+            _s.stderr.write("JARVIS_GUARD_BLOCKED: " + bad[:200] + "\n")
+            raise PermissionError("Blocked by Jarvis safety guard: " + bad[:200])
+    _s.addaudithook(hook)
+_jarvis_guard(); del _jarvis_guard
+"""
+
+
+def run_python(code, guarded=True):
+    """guarded: changes outside the temp folder, starting programs and the internet are stopped (see PY_GUARD).
+    The agent re-runs unguarded only after the user pressed Allow."""
+    r = subprocess.run([sys.executable, "-I", "-B", "-c", (PY_GUARD + "\n" if guarded else "") + code], capture_output=True, text=True,
+                       timeout=180, creationflags=subprocess.CREATE_NO_WINDOW, cwd=str(Path.home()))
     out = r.stdout.strip()
+    blocked = re.findall(r"JARVIS_GUARD_BLOCKED: (.+)", r.stderr or "")
+    if blocked:
+        return f"GUARD_BLOCKED: {blocked[0]}\n{out[:1500]}"
     if r.stderr.strip():
         err = r.stderr.strip()[-800:]
         hint = " Only the Python standard library and psutil are available - do NOT install packages." if "ModuleNotFound" in err else ""
@@ -679,11 +724,48 @@ _THEME_WORDS = {"crimson": "crimson", "red": "crimson", "ember": "crimson", "eme
                 "glass": "glass", "clear": "glass", "transparent": "glass", "silver": "glass", "white": "glass", "default": "glass"}
 
 
+_NUM_WORDS = {"zero": 0, "half": 0.5, "one": 1, "once": 1, "single": 1, "normal": 1, "two": 2, "twice": 2, "double": 2,
+              "three": 3, "thrice": 3, "triple": 3}
+_DIGIT_WORDS = {"zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
+                "eight": "8", "nine": "9"}
+
+
+def speed_from_words(text):
+    """The speaking speed the user actually said: 'two times' -> '2', 'one point five x' -> '1.5', 'slowest' -> '0.6',
+    'normal' -> '1.0'. None if they gave no exact speed ('a bit faster' is left to the model)."""
+    t = (text or "").lower().replace("-", " ")
+    if re.search(r"\b(slowest|minimum speed|as slow as)", t):
+        return "0.6"
+    if re.search(r"\b(fastest|maximum speed|max speed|as fast as)", t):
+        return "1.8"
+    m = re.search(r"\b(zero|one|two|three)\s+point\s+(zero|one|two|three|four|five|six|seven|eight|nine)\b", t)
+    if m:
+        return f"{_NUM_WORDS[m.group(1)]:g}.{_DIGIT_WORDS[m.group(2)]}"
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(x\b|times?\b|speed\b)", t) or re.search(r"\bspeed (?:to |at |of )?(\d+(?:\.\d+)?)\b", t)
+    if m:
+        return m.group(1)
+    if re.search(r"\bone and a half\b", t):
+        return "1.5"
+    m = re.search(r"\b(half|once|one|single|two|twice|double|three|thrice|triple)\s*(x\b|times?\b|speed\b)", t) \
+        or re.search(r"\b(twice|double|triple|half) (as )?(fast|speed)", t)
+    if m:
+        return f"{_NUM_WORDS[m.group(1)]:g}"
+    if re.search(r"\b(normal|default|regular|original|usual)\b", t):
+        return "1.0"
+    return None
+
+
 def jarvis_settings(setting, value):
     """Change Jarvis itself: theme/colour, speaking speed, spoken replies, wake word, follow-up listening."""
     if not APP["set"]:
         return "Error: settings are only available inside the Jarvis app."
     k, v = setting.lower(), str(value).lower().strip()
+    if re.search(r"remind|alarm|timer|notification|ring", k + " " + v) and re.search(r"sound|tone|tune|melody|chime|bell|beep|silent|ring|music", k + " " + v):
+        pick = ("melody" if re.search(r"melod|tune|song|music", v) else "bell" if "bell" in v else "beep" if "beep" in v
+                else "none" if re.search(r"none|silent|no sound|off|mute", v) else "chime" if re.search(r"chime|default|normal", v) else None)
+        if not pick:
+            return "Error: reminder sounds are Chime, Melody, Bell, Beep or Silent."
+        return APP["set"]("reminder_sound", pick)
     if re.search(r"colou?r|theme|look|skin", k):
         theme = next((t for w, t in _THEME_WORDS.items() if w in v), None)
         if not theme:
@@ -707,7 +789,7 @@ def jarvis_settings(setting, value):
     if re.search(r"voice|speak|spoken|talk|read aloud", k):
         return APP["set"]("voice", onoff)
     return ("Error: I can change: theme (glass/emerald/crimson), speaking speed, my voice (Lessac, Alan, Northern, Ryan), "
-            "spoken replies, wake word, follow-up listening.")
+            "reminder sound (chime/melody/bell/beep/silent), spoken replies, wake word, follow-up listening.")
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -771,6 +853,34 @@ def read_screen(window=""):
     title = lines[0].replace("WINDOW: ", "")
     body = "\n".join(l for l in lines[1:] if len(l.strip()) > 1)
     return (note + f"Text visible in the window '{title}' (read by OCR, may contain small mistakes):\n" + (body or "(no readable text)"))[:MAX_OUT]
+
+
+MMPROJ = Path(__file__).resolve().parents[1] / "models" / "mmproj-gemma-4-E2B-it-Q8_0.gguf"   # optional: setup.ps1 -Vision
+IMAGE_MARK = "IMAGE:"     # a tool result starting with this = a picture for the brain to look at (agent attaches it)
+
+
+def _view(mode, path=""):
+    import tempfile
+    out = Path(tempfile.gettempdir()) / f"jarvis_view_{int(time.time() * 1000)}.jpg"
+    res = _ps_file("capture_image.ps1", "-Mode", mode, *(["-Path", path] if path else []), "-Out", str(out), timeout=30)
+    if not res.startswith("OK") or not out.exists():
+        return f"Error: couldn't get the picture ({res[:150]})."
+    return f"{IMAGE_MARK}{out}"
+
+
+def look_at_screen(question="", window="front"):
+    """SEE the screen (local vision model - nothing leaves the PC). For reading text, read_screen is faster and exact."""
+    return _view("screen" if str(window).lower() in ("screen", "whole screen", "all", "everything") else "front")
+
+
+def describe_image(path, question=""):
+    """Look at a picture file on this PC (photo, screenshot, diagram)."""
+    p = _path(path)
+    if not p.exists():
+        return f"Error: {p} does not exist."
+    if p.suffix.lower() not in (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff"):
+        return "Error: I can only look at JPG, PNG, BMP, GIF or TIFF pictures."
+    return _view("file", str(p))
 
 
 def screenshot():
@@ -868,6 +978,22 @@ def set_timer(duration, label="Timer"):
     return f"Timer set for {d} - it goes off at {when:%I:%M:%S %p}."
 
 
+def snooze_reminder(minutes="5"):
+    """The reminder that just went off (last 30 min) comes back in N minutes."""
+    m = re.search(r"\d+(\.\d+)?", str(minutes))
+    mins = float(m.group()) if m else 5.0
+    items = load_json(REMINDERS, [])
+    fired = [r for r in items if r.get("fired") and not r.get("missed")
+             and (datetime.now() - datetime.fromisoformat(r["fired"])).total_seconds() < 1800]
+    if not fired:
+        return "No reminder went off in the last 30 minutes, so there's nothing to snooze."
+    last = max(fired, key=lambda r: r["fired"])
+    when = datetime.now() + timedelta(minutes=mins)
+    items.append({"text": last["text"], "when": when.isoformat(timespec="seconds"), "done": False})
+    save_json(REMINDERS, items)
+    return f"Snoozed: '{last['text']}' comes back at {when:%I:%M %p} (in {mins:g} minutes)."
+
+
 def list_reminders():
     items = [r for r in load_json(REMINDERS, []) if not r.get("done")]
     if not items:
@@ -922,6 +1048,110 @@ def complete_task(item, list_name="to-do"):
         i["done"] = True
     save_json(TASKS, data)
     return f"Marked done on {key}: {', '.join(i['item'] for i in hits)}" if hits else f"'{item}' isn't on your {key} list."
+
+
+# ======================================================== chat history (stays on this PC)
+CHATS = DATA / "chat_history.jsonl"
+_chat_vecs = {}                      # embedding cache: (time, user) -> vector
+
+
+def save_chat(user, answer):
+    """Every finished request is kept (time, what you asked, what Jarvis answered) - shown again after a restart and
+    searchable with recall_chats. Plain local file, never sent anywhere."""
+    try:
+        if CHATS.exists() and CHATS.stat().st_size > 5_000_000:      # keep it small: drop the oldest half
+            lines = CHATS.read_text(encoding="utf-8").splitlines()
+            CHATS.write_text("\n".join(lines[len(lines) // 2:]) + "\n", encoding="utf-8")
+        with open(CHATS, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"time": datetime.now().isoformat(timespec="seconds"), "user": user, "answer": answer},
+                               ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def load_chats():
+    out = []
+    try:
+        for line in CHATS.read_text(encoding="utf-8").splitlines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+    except OSError:
+        pass
+    return out
+
+
+def _when_range(when):
+    """'today', 'yesterday', '3 days ago', 'last week', 'this week', 'monday' -> (start, end) datetimes, or None."""
+    w = (when or "").lower().strip()
+    if not w or w in ("any", "anytime", "ever", "all"):
+        return None
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    if "today" in w or "this morning" in w or "earlier" in w:
+        return today, today + timedelta(days=1)
+    if "yesterday" in w:
+        return today - timedelta(days=1), today
+    m = re.search(r"(\d+|one|two|three|four|five|six|seven) days? ago", w)
+    if m:
+        n = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7}.get(m.group(1)) or int(m.group(1))
+        return today - timedelta(days=n), today - timedelta(days=n - 1)
+    if "last week" in w:
+        return today - timedelta(days=today.weekday() + 7), today - timedelta(days=today.weekday())
+    if "this week" in w:
+        return today - timedelta(days=today.weekday()), today + timedelta(days=1)
+    days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    for i, d in enumerate(days):
+        if d in w:
+            back = (today.weekday() - i) % 7 or 7
+            return today - timedelta(days=back), today - timedelta(days=back - 1)
+    return None
+
+
+def _embed(texts):
+    """Meaning vectors from the router's small embedding model (already running on port 8101 - no extra model)."""
+    import numpy as np
+    req = urllib.request.Request("http://127.0.0.1:8101/v1/embeddings", data=json.dumps({"input": texts}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        v = np.array([d["embedding"] for d in json.loads(r.read())["data"]], dtype=np.float32)
+    return v / np.linalg.norm(v, axis=1, keepdims=True)
+
+
+def recall_chats(query="", when=""):
+    """Search what you and Jarvis talked about before (saved chats). when: today / yesterday / 3 days ago / last week..."""
+    chats = load_chats()
+    rng = _when_range(when) or _when_range(query)
+    if rng:
+        chats = [c for c in chats if rng[0] <= datetime.fromisoformat(c["time"]) < rng[1]]
+    if not chats:
+        return "No saved conversations " + (f"for {when or query}." if rng else "yet.")
+    chats = chats[-400:]
+    q = re.sub(r"\b(what|did|we|talk(ed)?|about|chat(ted)?|discuss(ed)?|say|said|ask(ed)?|tell|told|you|me|i|the|our|"
+               r"conversation|yesterday|today|earlier|last|week|time|remember|do)\b", " ", (query or "").lower()).strip()
+    if q:
+        try:
+            import numpy as np
+            keys = [(c["time"], c["user"]) for c in chats]
+            new = [k for k in keys if k not in _chat_vecs]
+            for i in range(0, len(new), 64):
+                part = new[i:i + 64]
+                byk = {(c["time"], c["user"]): c for c in chats}
+                vecs = _embed([f"{k[1]} - {byk[k]['answer'][:200]}" for k in part])
+                _chat_vecs.update(zip(part, vecs))
+            qv = _embed([q])[0]
+            scores = np.array([float(_chat_vecs[k] @ qv) for k in keys])
+            chats = [chats[i] for i in np.argsort(-scores)[:6] if scores[i] > 0.45] or chats[-6:]
+            chats.sort(key=lambda c: c["time"])
+        except Exception:                      # embedding model not running: plain word match
+            words = set(re.findall(r"\w{3,}", q))
+            hit = [c for c in chats if words & set(re.findall(r"\w{3,}", (c["user"] + " " + c["answer"]).lower()))]
+            chats = (hit or chats)[-6:]
+    else:
+        chats = chats[-8:]
+    return "Saved conversations:\n" + "\n".join(
+        f"- {datetime.fromisoformat(c['time']):%a %d %b %I:%M %p}: you asked \"{c['user'][:150]}\" -> I said \"{c['answer'][:220]}\""
+        for c in chats)
 
 
 # ======================================================== memory, skills
@@ -1098,6 +1328,8 @@ TOOLS = {t["name"]: t for t in [
     _fn("set_timer", "Start a countdown timer.", set_timer, duration="e.g. '10 minutes', '30 seconds'", label="name (optional)"),
     _fn("list_reminders", "Show upcoming reminders and timers.", list_reminders),
     _fn("cancel_reminder", "Cancel reminders/timers matching some words.", cancel_reminder, text="words from the reminder"),
+    _fn("snooze_reminder", "Snooze the reminder that just went off ('snooze', 'remind me again in 10 minutes').", snooze_reminder,
+        minutes="minutes to wait (optional, default 5)"),
     _fn("add_task", "Add items to a list (to-do, shopping, any name).", add_task, item="item(s), comma separated",
         list_name="list name, e.g. shopping (optional)"),
     _fn("list_tasks", "Show the items on a list ('all' for every list).", list_tasks, list_name="list name (optional)"),
@@ -1106,6 +1338,9 @@ TOOLS = {t["name"]: t for t in [
     _fn("read_notes", "Read the notes the user asked you to save (NOT files on disk - use read_file for files).", read_notes),
     # memory & learning
     _fn("remember", "Save a lasting fact about the user or a preference.", remember, fact="the fact, as a short sentence"),
+    _fn("recall_chats", "Search earlier conversations with the user (saved on this PC): 'what did we talk about yesterday', "
+        "'what did I ask you about X'.", recall_chats, query="what to look for (optional)",
+        when="today / yesterday / 3 days ago / last week / monday (optional)"),
     _fn("forget", "Delete remembered facts about a topic.", forget, fact="what to forget"),
     _fn("save_skill", "Learn a skill: save SHORT steps for a task to repeat later. Use only the tools needed to get the "
         "data (e.g. 1. system_info 2. report battery, RAM, C free). Never add run_python to read another tool's output.", save_skill,
@@ -1113,3 +1348,51 @@ TOOLS = {t["name"]: t for t in [
     _fn("use_skill", "Load the steps of a learned skill.", use_skill, name="skill name"),
     _fn("ask_big_ai", "Hand a very hard task to a bigger AI (not set up yet).", ask_big_ai, question="the full task"),
 ]}
+
+if MMPROJ.exists():          # the brain's eyes (Gemma 4's own image encoder, ~0.6 GB): look_at_screen / describe_image
+    TOOLS.update({t["name"]: t for t in [
+        _fn("look_at_screen", "SEE the screen with your own eyes (local, private): what something looks like, pictures, colours, "
+            "layout, 'what do you see'. For reading/quoting TEXT use read_screen (faster, exact).", look_at_screen,
+            question="what to look for (optional)", window="'front' (default) or 'screen' for everything (optional)"),
+        _fn("describe_image", "Look at a picture file on this PC (photo, screenshot, diagram) and describe it or answer about it.",
+            describe_image, path="full path of the image file", question="what to look for (optional)"),
+    ]})
+
+
+# ======================================================== plugins: your own tools (data/plugins/*.py)
+PLUGINS = DATA / "plugins"
+PLUGIN_ERRORS = []
+
+
+def tool(description, risk="confirm", **params):
+    """Mark a function in a plugin file as a Jarvis tool. params: name="what it is" (all strings; add '(optional)').
+    risk: "confirm" (default - an Allow/Deny popup every time) or "safe" (runs straight away: only for look-only tools)."""
+    def wrap(fn):
+        fn._jarvis = {"description": description, "risk": "safe" if risk == "safe" else "confirm", "params": params}
+        return fn
+    return wrap
+
+
+def _load_plugins():
+    """Loads ONLY the .py files YOU put in data/plugins (Jarvis never writes there). A broken file is skipped, never fatal."""
+    import importlib.util
+    PLUGINS.mkdir(parents=True, exist_ok=True)
+    loaded = []
+    for f in sorted(PLUGINS.glob("*.py")):
+        try:
+            spec = importlib.util.spec_from_file_location(f"jarvis_plugin_{f.stem}", f)
+            mod = importlib.util.module_from_spec(spec)
+            mod.tool = tool                                 # so a plugin can use @tool without importing anything
+            spec.loader.exec_module(mod)
+        except Exception as e:
+            PLUGIN_ERRORS.append(f"{f.name}: {e}")
+            continue
+        for name, fn in vars(mod).items():
+            meta = getattr(fn, "_jarvis", None)
+            if callable(fn) and meta and name not in TOOLS:
+                TOOLS[name] = dict(_fn(name, meta["description"], fn, **meta["params"]), risk=meta["risk"], plugin=f.name)
+                loaded.append(name)
+    return loaded
+
+
+PLUGIN_TOOLS = _load_plugins()

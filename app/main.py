@@ -5,7 +5,7 @@ Windows (pywebview / Edge WebView2):
   panel - chat with live steps, result cards, in-panel Allow/Deny, quick actions, settings.
 Global shortcut: Ctrl+Alt+J = talk from anywhere.
 """
-import ctypes, json, os, re, subprocess, threading, time, winsound
+import ctypes, difflib, json, os, re, subprocess, threading, time, winsound
 from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
@@ -163,6 +163,7 @@ class JarvisApp:
         self.no_followup = False         # set by "stop": don't keep listening afterwards
         self.training = False
         self.busy, self.ready_flag, self.panel_shown = True, False, True
+        self.panel_ok = threading.Event()        # set when the panel page has loaded (pywebview ready)
         self.confirms, self.state = {}, "starting"
         self.bridge = Bridge(self)
         sw, sh = webview.screens[0].width, webview.screens[0].height
@@ -176,9 +177,22 @@ class JarvisApp:
                                            resizable=True, min_size=(360, 480), background_color="#040907")
 
     # ---------------- events to the UI
+    _js_lock = threading.Lock()
+
+    def js(self, code):
+        """ONE script at a time into the panel. pywebview's evaluate_js (WinForms + WebView2 via pythonnet) crashed the
+        whole app natively when several threads (ears level meter, streaming text, reminders) called it at once
+        (night test 18 Nov: ntdll access violation in edgechromium.evaluate_js)."""
+        if not self._js_lock.acquire(timeout=5):    # a stuck panel must never freeze the rest of the app
+            return None
+        try:
+            return self.panel.evaluate_js(code)
+        finally:
+            self._js_lock.release()
+
     def emit(self, **e):
         try:
-            self.panel.evaluate_js(f"window.onEvent && window.onEvent({json.dumps(e)})")
+            self.js(f"window.onEvent && window.onEvent({json.dumps(e)})")
         except Exception:
             pass
 
@@ -198,6 +212,13 @@ class JarvisApp:
 
     # ---------------- startup
     def boot(self):
+        from speech import trim_log
+        for f in (LOG, tools.DATA / "router.log"):      # logs never grow without limit
+            trim_log(f, 2_000_000)
+        try:                                            # the ears live in this process: they get the CPU first
+            psutil.Process().nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+        except Exception:
+            pass
         self.set_state("starting", "Loading the brain…")
         try:
             secs = self.agent.start()
@@ -212,6 +233,9 @@ class JarvisApp:
         if self.speaker:
             self.speaker.speed = float(self.settings.get("speech_speed", 1.0))
         tools.APP["set"] = self.brain_setting
+        # night test 18 Nov: with the fast start (~3 s) the app went live before the panel (WebView2) had loaded, and
+        # 2 of 3 self-test runs crashed natively (ntdll access violation). Wait for the panel like before (max 30 s).
+        self.panel_ok.wait(30)
         self.start_ears()                # its own error message; a microphone problem never stops typing
         bind_children_to_app()
         self.busy, self.ready_flag = False, True
@@ -233,7 +257,7 @@ class JarvisApp:
                   f"voice_filter={bool(self.ears and self.ears.verified)} "
                   f"echo_cancel={bool(self.ears and self.ears.aec is not None and self.ears.far is not None)} "
                   f"voice_id={bool(self.ears and self.ears.voice_id is not None)}\n"); out.flush()
-        js = lambda code: self.panel.evaluate_js(code)
+        js = self.js
         def wait_idle(timeout=120):
             t0 = time.time()
             while (self.busy or self.state in ("thinking", "working")) and time.time() - t0 < timeout:
@@ -307,14 +331,37 @@ class JarvisApp:
         # live caption + mic level events render
         self.emit(type="caption", text="open chrome in incognito mode and"); self.emit(type="level", v=0.6); time.sleep(0.3)
         out.write("CAPTION: " + str(js("document.getElementById('liveCap')?.innerText")) + "\n")
+        out.write("ROUND11: " + str(js("JSON.stringify({history_items: document.querySelectorAll('.history').length, "
+                                       "history_line: document.querySelectorAll('.history-line').length, "
+                                       "rem_sound_chips: document.querySelectorAll('#remSound .vpick').length, "
+                                       "code_word_box: !!document.getElementById('codeWord'), "
+                                       "code_state: (document.getElementById('codeState')||{}).innerText})")) +
+                  f" plugins={sorted(getattr(tools, 'PLUGIN_TOOLS', []))} vision={getattr(self.agent, 'vision', None)}\n")
         self.emit(type="caption", text=""); self.emit(type="level", v=0)
         out.write("DONE\n"); out.close()
 
     def on_panel_ready(self):
+        self.panel_ok.set()
         self.push_settings()
+        self.push_history()
         self.orb.set_theme(self.settings.get("theme", "glass"))
         if self.ready_flag:
             self.set_state("idle")
+
+    def push_history(self):
+        """Show the last few saved chats (faded) after a restart. First run: start the history from actions.log."""
+        if not tools.CHATS.exists() and LOG.exists():
+            try:
+                for line in LOG.read_text(encoding="utf-8").splitlines():
+                    e = json.loads(line)
+                    if e.get("user") and e.get("answer"):
+                        with open(tools.CHATS, "a", encoding="utf-8") as f:
+                            f.write(json.dumps({"time": e["time"], "user": e["user"], "answer": e["answer"]}, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+        items = [{"user": c["user"], "answer": c["answer"],
+                  "when": datetime.fromisoformat(c["time"]).strftime("%a %d %b, %I:%M %p")} for c in tools.load_chats()[-12:]]
+        self.emit(type="history", items=items)
 
     # ---------------- requests
     STOP_RE = re.compile(r"^\W*(?:hey\s+)?(?:jarvis\W+)?(stop|cancel|abort|never ?mind|wait|hold on|enough|shut up|be quiet|quiet|top)"
@@ -326,6 +373,8 @@ class JarvisApp:
         if not text or not self.ready_flag:
             return
         from speech import is_stop
+        if self.confirms and via != "typed" and self._voice_confirm(text, strong=via in ("wake", "followup", "ambient")):
+            return
         if self.STOP_RE.match(text) or (via != "typed" and is_stop(text)):
             self.stop_current(said=True)
             return
@@ -388,6 +437,7 @@ class JarvisApp:
         secs = time.time() - t0
         self.last_answer = answer
         self.emit(type="answer", text=answer, cards=build_cards(actions), secs=secs, tools=[a["tool"] for a in actions])
+        tools.save_chat(text, answer)              # chat history (shown after a restart, searchable)
         with open(LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps({"time": datetime.now().isoformat(timespec="seconds"), "user": text, "answer": answer,
                                 "actions": [{k: v for k, v in a.items() if k != "result"} for a in actions]}, ensure_ascii=False) + "\n")
@@ -448,11 +498,34 @@ class JarvisApp:
         self.confirms[cid] = (ev, box)
         self.set_state("waiting")
         self.show_panel()
-        self.say("I need your OK for this one.")
+        self.say("I need your OK for this one." + (" Say your code word, or click Allow." if self.settings.get("confirm_word") else ""))
         self.emit(type="confirm", id=cid, tool=tool, args=args, reason=reason)
         ev.wait()
         self.set_state("working")
         return box.get("ok", False)
+
+    DENY_RE = re.compile(r"\b(no|nope|deny|denied|don'?t|do not|cancel|never ?mind|not now|leave it)\b", re.I)
+
+    def _voice_confirm(self, text, strong):
+        """Allow by voice: your secret code word, said in YOUR voice (strong voice match) while an Allow/Deny is waiting.
+        'No' / 'deny' declines (declining is always safe). Returns True if the words were used for the popup."""
+        if not self.confirms or not text:
+            return False
+        cid = max(self.confirms)                       # the newest waiting popup
+        word = re.sub(r"[^a-z0-9 ]", "", str(self.settings.get("confirm_word") or "").lower()).strip()
+        said = re.sub(r"[^a-z0-9 ]", " ", text.lower()).split()
+        if word and strong:
+            n = len(word.split())
+            grams = [" ".join(said[i:i + n]) for i in range(max(1, len(said) - n + 1))]
+            if any(g == word or (len(word) >= 5 and difflib.SequenceMatcher(None, g, word).ratio() >= 0.85) for g in grams):
+                self.emit(type="toast", text="Allowed by your code word.")
+                self.answer_confirm(cid, True)
+                return True
+        if self.DENY_RE.search(text):
+            self.emit(type="toast", text="Declined by voice.")
+            self.answer_confirm(cid, False)
+            return True
+        return False
 
     def answer_confirm(self, cid, ok):
         ev, box = self.confirms.pop(int(cid), (None, None))
@@ -477,6 +550,7 @@ class JarvisApp:
             self.ears.speaking = lambda: bool(self.speaker and self.speaker.busy())
             self.ears.recent_spoken = lambda: [x for t, x in self.said_log if time.time() - t < 90]
             self.ears.busy = lambda: bool(self.busy)
+            self.ears.expect_confirm = lambda: bool(self.confirms)
             from voice import FAR
             self.ears.far = FAR.take             # echo cancellation reference (what Jarvis is playing)
             self.ears.expecting_answer = lambda: self.last_answer.rstrip().endswith("?")
@@ -500,6 +574,8 @@ class JarvisApp:
                 self.emit(type="toast", text="Listening… (say \"stop\" to cancel, or a new request to queue it)")
             if self.speaker:
                 self.speaker.chime("wake")
+        elif kind == "confirm_reply":                # you spoke while an Allow/Deny is waiting
+            self._voice_confirm(d.get("text", ""), d.get("strong", False))
         elif kind == "partial":
             self.emit(type="caption", text=d["text"])
         elif kind == "final":
@@ -663,7 +739,9 @@ class JarvisApp:
             from voice import VOICES
         except Exception:
             VOICES = {}
-        self.emit(type="settings", settings=self.settings, memory=tools.load_json(tools.MEMORY, []), skills=tools.list_skills(),
+        shown = {k: v for k, v in self.settings.items() if k != "confirm_word"}     # the code word never goes to the screen
+        self.emit(type="settings", settings=shown, code_word_set=bool(self.settings.get("confirm_word")),
+                  memory=tools.load_json(tools.MEMORY, []), skills=tools.list_skills(),
                   voices=VOICES, current_voice=getattr(self.speaker, "voice_name", None),
                   voice_trained=VOICE_FILTER.exists(), stt=self.ears.stt.name if self.ears else None)
 
@@ -712,12 +790,16 @@ class JarvisApp:
             new = (float(num.group()) if num and float(num.group()) <= 3 else
                    1.0 if "normal" in v or "default" in v else
                    cur / 1.2 if re.search(r"slow|decrease|reduce|lower", v) else cur * 1.2)
+            asked = new
             new = round(max(0.6, min(1.8, new)), 2)
             self.settings["speech_speed"] = new
             if self.speaker:
                 self.speaker.speed = new
             tools.save_json(SETTINGS_FILE, {k: v for k, v in self.settings.items() if k != "autostart"})
-            return f"Speaking speed set to {new}x (was {cur}x)."
+            self.push_settings()
+            limit = ("" if abs(asked - new) < 0.01 else
+                     f" ({asked:g}x was asked, but {new}x is the {'fastest' if new >= 1.8 else 'slowest'} I can speak.)")
+            return f"Speaking speed set to {new}x (was {cur}x).{limit}"
         self.set_setting(key, value)
         if key == "speaker_voice":
             from voice import VOICES
@@ -725,8 +807,11 @@ class JarvisApp:
                 return "Error: voices are " + ", ".join(VOICES.values())
             self.set_setting(key, value)
             return f"Voice changed to {VOICES[value]}."
-        names = {"theme": "Theme", "voice": "Spoken replies", "wake": "Wake word", "followup": "Follow-up listening"}
-        val = value if key == "theme" else ("on" if value else "off")
+        names = {"theme": "Theme", "voice": "Spoken replies", "wake": "Wake word", "followup": "Follow-up listening",
+                 "reminder_sound": "Reminder sound"}
+        if key == "reminder_sound" and self.speaker:
+            threading.Thread(target=self.speaker.play_reminder, args=(value,), daemon=True).start()   # let you hear it
+        val = value if key in ("theme", "reminder_sound") else ("on" if value else "off")
         return f"{names.get(key, key)} is now {val}."
 
     def forget_index(self, i):
@@ -744,19 +829,45 @@ class JarvisApp:
 
     # ---------------- background loops
     def reminder_loop(self):
+        """Fires reminders: your chosen sound + a Windows notification (seen even when the panel is closed) + spoken.
+        Reminders that came due while Jarvis was off are told once at startup ('While I was off, you missed ...')."""
+        first = True
         while True:
             items = tools.load_json(tools.REMINDERS, [])
-            changed = False
+            changed, missed, now = False, [], datetime.now()
             for r in items:
-                if not r.get("done") and datetime.fromisoformat(r["when"]) <= datetime.now():
-                    r["done"] = changed = True
-                    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-                    self.show_panel()
-                    self.emit(type="reminder", text=r["text"])
-                    self.say("Reminder. " + r["text"])
+                if r.get("done") or datetime.fromisoformat(r["when"]) > now:
+                    continue
+                r["done"] = changed = True
+                r["fired"] = now.isoformat(timespec="seconds")          # for "snooze"
+                if first and (now - datetime.fromisoformat(r["when"])).total_seconds() > 90:
+                    r["missed"] = True
+                    missed.append(r)
+                    continue
+                self._ring(r["text"])
+            if missed:
+                when = lambda r: datetime.fromisoformat(r["when"]).strftime("%I:%M %p").lstrip("0")
+                text = "; ".join(f"{r['text']} ({when(r)})" for r in missed[-5:])
+                self._ring(f"While I was off, you missed: {text}", spoken="While I was off, you missed " +
+                           (f"{len(missed)} reminders. " if len(missed) > 1 else "a reminder. ") + text)
             if changed:
                 tools.save_json(tools.REMINDERS, items)
+            first = False
             time.sleep(1)
+
+    def _ring(self, text, spoken=None):
+        sound = self.settings.get("reminder_sound", "chime")
+        if self.speaker:
+            self.speaker.play_reminder(sound)
+        elif sound != "none":
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        try:
+            tools._ps_file("winrt_toast.ps1", "-Title", "Jarvis reminder", "-Text", text[:200], timeout=15)
+        except Exception:
+            pass
+        self.show_panel()
+        self.emit(type="reminder", text=text)
+        self.say(spoken or ("Reminder. " + text + " Say snooze if you need more time."))
 
     def hotkey_loop(self):
         """Global Ctrl+Alt+J -> talk."""

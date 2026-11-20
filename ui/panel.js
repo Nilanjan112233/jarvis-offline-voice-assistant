@@ -158,8 +158,28 @@ window.onEvent = function (e) {
     case "level": setLevel(e.v); break;
     case "train": showTrain(e); break;
     case "settings": settings = e.settings; applyTheme(settings.theme); renderSettings(e); break;
+    case "history": addHistory(e.items || []); break;
   }
 };
+
+// earlier chats (saved on this PC in data/chat_history.jsonl), shown faded above today's conversation
+function addHistory(items) {
+  if (!items.length || feed.querySelector(".history")) return;
+  hideEmpty();
+  const box = document.createElement("div");
+  box.className = "history";
+  items.forEach((it) => {
+    const y = document.createElement("div"); y.className = "msg-you"; y.textContent = it.user; box.appendChild(y);
+    const j = document.createElement("div"); j.className = "msg-j";
+    const b = document.createElement("div"); b.className = "bubble"; b.textContent = it.answer; j.appendChild(b);
+    const m = document.createElement("div"); m.className = "meta"; m.textContent = it.when; j.appendChild(m);
+    box.appendChild(j);
+  });
+  const line = document.createElement("div"); line.className = "history-line"; line.textContent = "Earlier chats ↑ · today ↓";
+  box.appendChild(line);
+  feed.prepend(box);
+  scroll();
+}
 
 // ------------------------------------------------------------ user actions
 let pendingTyped = null;
@@ -200,6 +220,9 @@ $("#hideBtn").onclick = () => api.hide_panel();
 $("#settingsBtn").onclick = () => { api.get_settings(); $("#sheet").classList.add("open"); };
 $("#backBtn").onclick = () => $("#sheet").classList.remove("open");
 $("#openData").onclick = () => api.open_data();
+$("#codeSave").onclick = () => { const w = $("#codeWord").value.trim(); $("#codeWord").value = "";
+  if (w && w.length < 4) { toast("Code word needs 4+ letters."); return; }
+  api.set_setting("confirm_word", w); toast(w ? "Code word saved." : "Allow by voice is off."); };
 $("#quitBtn").onclick = () => api.quit();
 document.querySelectorAll(".swatch").forEach((s) => (s.onclick = () => { applyTheme(s.dataset.themePick); api.set_setting("theme", s.dataset.themePick); }));
 $("#trainBtn").onclick = () => { $("#trainBtn").disabled = true; api.train_voice(); };
@@ -221,6 +244,13 @@ function renderSettings(e) {
   $("#voiceState").textContent = e.voice_trained ? "Trained on your voice ✓ — run again any time to refresh it."
     : 'Say "Hey Jarvis" 10 times + read 4 lines (~1 min). Wakes more reliably, ignores other voices.';
   $("#trainBtn").textContent = e.voice_trained ? "Retrain" : "Start";
+  document.querySelectorAll("#remSound .vpick").forEach((b) => {
+    b.classList.toggle("on", b.dataset.rs === (settings.reminder_sound || "chime"));
+    b.onclick = () => api.set_setting("reminder_sound", b.dataset.rs);
+  });
+  $("#codeState").textContent = e.code_word_set
+    ? "Code word is set ✓ — say it when Jarvis asks for your OK. \"No\" or \"deny\" declines. Clear the box and Save to turn it off."
+    : 'Pick a secret code word. When Jarvis asks for your OK, say it (in your own voice) instead of clicking Allow. "No" or "deny" always declines. Empty = click only.';
   const mem = $("#memList"), sk = $("#skillList");
   mem.innerHTML = (e.memory || []).length ? e.memory.map((m, i) => `<div class="item"><span>${esc(m)}</span><button data-mem="${i}" title="Forget">×</button></div>`).join("")
     : `<div class="muted">Nothing yet. Tell Jarvis things like "my name is…" or "I live in…".</div>`;

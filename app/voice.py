@@ -55,6 +55,10 @@ class FarEnd:
 
 
 FAR = FarEnd()
+# night test 18 Nov: sounddevice's play()/stop()/get_stream() share ONE global stream and are not thread-safe.
+# stop() from the app thread while the play thread was inside play/active crashed the whole app natively
+# (access violation, 3 of 6 self-test runs). Rule: every sd.* call holds SD_LOCK; only the play thread stops speech.
+SD_LOCK = threading.Lock()
 
 
 # ================================================================ speaking
@@ -104,7 +108,7 @@ class Speaker:
                     q.get_nowait()
             except queue.Empty:
                 pass
-        sd.stop()
+        # no sd.stop() here (other thread): the play loop / reminder sees the new _gen within 20 ms and stops itself
 
     def busy(self):
         return not self.q.empty() or not self.audio_q.empty() or self._speaking or self._playing
@@ -118,10 +122,57 @@ class Speaker:
         notes = {"wake": (880, 1320), "off": (990, 660)}[kind]
         tone = np.concatenate([np.sin(2 * np.pi * f * t) * np.hanning(len(t)) for f in notes])
         try:
-            FAR.play((tone * 0.22 * 32767).astype(np.int16), sr)
-            sd.play((tone * 0.22 * 32767).astype(np.int16), sr)
+            with SD_LOCK:
+                FAR.play((tone * 0.22 * 32767).astype(np.int16), sr)
+                sd.play((tone * 0.22 * 32767).astype(np.int16), sr)
         except Exception:
             pass
+
+    REMINDER_SOUNDS = {"chime": "Chime", "melody": "Melody", "bell": "Bell", "beep": "Beep", "none": "Silent"}
+
+    @staticmethod
+    def reminder_tone(kind):
+        """Reminder sounds, made on the fly (nothing downloaded)."""
+        sr = 22050
+
+        def note(f, dur, vol=0.25, decay=4.0):
+            t = np.arange(int(sr * dur)) / sr
+            w = np.sin(2 * np.pi * f * t) + 0.3 * np.sin(4 * np.pi * f * t)      # a touch of overtone = softer, warmer
+            return w * np.exp(-decay * t) * np.minimum(1, t * 200) * vol
+
+        if kind == "melody":                     # a short rising tune, twice
+            tune = [(523, .18), (659, .18), (784, .18), (1047, .36), (0, .15)] * 2
+        elif kind == "bell":
+            tune = [(880, .9), (0, .1), (880, .9)]
+        elif kind == "beep":
+            tune = [(1000, .12), (0, .08)] * 3
+        else:                                    # chime
+            tune = [(784, .25), (1175, .5)]
+        parts = [note(f, d, decay=1.5 if kind == "bell" else 4.0) if f else np.zeros(int(sr * d)) for f, d in tune]
+        return (np.concatenate(parts) * 32767 * 0.8).astype(np.int16), sr
+
+    def play_reminder(self, kind="chime"):
+        if kind == "none":
+            return
+        try:
+            audio, sr = self.reminder_tone(kind)
+            self._play_until_done(audio, sr, self._gen)
+        except Exception:
+            pass
+
+    def _play_until_done(self, audio, rate, gen):
+        """Play and wait; stops early when stop() was called (new _gen). All sounddevice calls under SD_LOCK."""
+        with SD_LOCK:
+            FAR.play(audio, rate)
+            sd.play(audio, rate)
+        while True:
+            with SD_LOCK:
+                if gen != self._gen:
+                    sd.stop()
+                    return
+                if not sd.get_stream().active:
+                    return
+            time.sleep(0.02)
 
     _speaking = _playing = False
 
@@ -133,7 +184,13 @@ class Speaker:
                 continue                      # queued before a stop
             self._speaking = True
             try:
-                for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+                parts = [x for x in re.split(r"(?<=[.!?])\s+|\n+", text) if x.strip()]
+                # a long first sentence: speak its first clause right away (Piper makes a whole piece before playing)
+                if parts and len(parts[0].split()) > 12:
+                    m = re.search(r"^(.{25,}?[,;:])\s+(.{15,})$", parts[0])
+                    if m:
+                        parts[:1] = [m.group(1), m.group(2)]
+                for sentence in parts:
                     if gen != self._gen:
                         break
                     if sentence.strip():
@@ -156,12 +213,7 @@ class Speaker:
                                     "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak($input)"],
                                    input=audio, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
                 else:
-                    FAR.play(audio, rate)
-                    sd.play(audio, rate)
-                    while sd.get_stream().active:
-                        if gen != self._gen:
-                            sd.stop(); break
-                        time.sleep(0.02)
+                    self._play_until_done(audio, rate, gen)
             except Exception as e:
                 print("speech error:", e)
             self._playing = False
@@ -255,68 +307,3 @@ class Listener:
 
 
 # ================================================================ wake word ("Hey Jarvis"), offline
-class WakeWord:
-    """Listens all the time for "Hey Jarvis" (openWakeWord, ~0.4% CPU). Nothing is recorded or sent anywhere.
-    Two-stage check to avoid false wake-ups ("Hey, Java..."): the wake model must fire on 2 frames in a row,
-    then the last ~2 s of audio are transcribed and must contain "Jarvis"."""
-    CHUNK = 1280   # 80 ms at 16 kHz
-
-    def __init__(self, on_wake, listener, paused=lambda: False, threshold=0.5):
-        from openwakeword.model import Model
-        self.model = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
-        self.on_wake, self.listener, self.paused, self.threshold = on_wake, listener, paused, threshold
-        self.ring, self.hits, self.running, self.cooldown = [], 0, False, 0.0
-
-    def start(self):
-        self.running = True
-        threading.Thread(target=self._loop, daemon=True).start()
-
-    def stop(self):
-        self.running = False
-
-    def _loop(self):
-        while self.running:
-            try:
-                with sd.InputStream(samplerate=RATE, channels=1, dtype="int16", blocksize=self.CHUNK) as st:
-                    while self.running:
-                        data, _ = st.read(self.CHUNK)
-                        self.process(data[:, 0].copy())
-            except Exception as e:   # mic unplugged etc. -> retry
-                print("wake word mic error:", e)
-                time.sleep(3)
-
-    def process(self, chunk):
-        """Feed 80 ms of int16 audio. On a wake, calls on_wake(buffered_audio) and returns True."""
-        self.ring.append(chunk)
-        self.ring = self.ring[-30:]   # keep ~2.4 s
-        if self.paused() or time.time() < self.cooldown:
-            self.hits = 0
-            self.model.reset()
-            return False
-        score = self.model.predict(chunk)["hey_jarvis"]
-        self.hits = self.hits + 1 if score >= self.threshold else 0
-        if self.hits < 2:
-            return False
-        self.hits, self.cooldown = 0, time.time() + 2.0
-        self.model.reset()
-        buffered = np.concatenate(self.ring)
-        self.ring = []
-        self.on_wake(buffered)   # the app keeps recording from here and checks the transcript says "Jarvis"
-        return True
-
-    @staticmethod
-    def split_command(text):
-        """'hey jarvis what's the weather' -> (True, "what's the weather"); no 'Jarvis' -> (False, '')."""
-        m = re.search(r"\b(jarvis|jarvas|jervis|javis)\b[\s,.!?]*(.*)", text or "", re.I)
-        return (True, m.group(2).strip()) if m else (False, "")
-
-    def verify(self, audio):
-        """Second opinion from the speech recognizer. Returns words after 'Jarvis' ('' if none), or None if not really 'Jarvis'."""
-        if not self.listener:
-            return ""
-        try:
-            text = self.listener.transcribe(audio).lower()
-        except Exception:
-            return ""   # recognizer busy/unavailable -> trust the wake model
-        m = re.search(r"\b(jarvis|jarvas|jervis|javis)\b[\s,.!?]*(.*)", text)
-        return m.group(2).strip() if m else None

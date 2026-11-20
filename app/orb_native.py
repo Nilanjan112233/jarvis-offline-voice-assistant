@@ -104,6 +104,7 @@ class NativeOrb:
             self.theme = name
 
     def show(self, visible=True):
+        self.visible = visible
         if self.hwnd:
             user32.ShowWindow(self.hwnd, 4 if visible else 0)   # SW_SHOWNOACTIVATE / SW_HIDE
 
@@ -171,7 +172,9 @@ class NativeOrb:
         try:
             if msg == 0x0113:                                   # WM_TIMER
                 self._tick += 1
-                if self.state in ("idle", "starting") and self._tick % 2:
+                # drawing runs in Python and competes with the ears for the CPU: idle = ~6 fps (slow drift looks the
+                # same), hidden = nothing, busy states = full ~25 fps
+                if not self.visible or (self.state in ("idle", "starting") and self._tick % 4):
                     return 0
                 self._frame()
                 return 0
@@ -204,6 +207,7 @@ class NativeOrb:
         return user32.DefWindowProcW(hwnd, msg, wp, lp)
 
     _tick = 0
+    visible = True
 
     # ---------------- drawing
     def _prep(self):
